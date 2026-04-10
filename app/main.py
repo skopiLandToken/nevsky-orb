@@ -66,6 +66,58 @@ def write_audit_log(
         ),
     )
 
+
+def write_ai_usage_log(
+    cur,
+    user_id,
+    provider,
+    model,
+    action_type,
+    input_chars,
+    input_tokens=None,
+    output_tokens=None,
+    estimated_cost_usd=None,
+    object_type=None,
+    object_id=None,
+    status="success",
+    error_message=None,
+):
+    cur.execute(
+        """
+        INSERT INTO ai_usage_logs (
+            tenant_id,
+            user_id,
+            provider,
+            model,
+            action_type,
+            object_type,
+            object_id,
+            input_chars,
+            input_tokens,
+            output_tokens,
+            estimated_cost_usd,
+            status,
+            error_message
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            "skopi",
+            user_id,
+            provider,
+            model,
+            action_type,
+            object_type,
+            object_id,
+            input_chars,
+            input_tokens,
+            output_tokens,
+            estimated_cost_usd,
+            status,
+            error_message,
+        ),
+    )
+
 class HealthResponse(BaseModel):
     status: str
     environment: str
@@ -643,29 +695,79 @@ def ai_summarize(body: SummarizeRequest):
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY is not set")
 
     client = Anthropic(api_key=api_key)
-
+    model_name = "claude-haiku-4-5"
     trimmed_text = body.text.strip()[:4000]
+    input_chars = len(trimmed_text)
 
-    response = client.messages.create(
-        model="claude-haiku-4-5",
-        max_tokens=120,
-        temperature=0,
-        system="You are Nevsky ORB. Summarize operational text briefly and clearly in 2-4 bullet points.",
-        messages=[
-            {
-                "role": "user",
-                "content": f"Summarize this text for an operational dashboard:\\n\\n{trimmed_text}"
-            }
-        ]
-    )
+    try:
+        response = client.messages.create(
+            model=model_name,
+            max_tokens=120,
+            temperature=0,
+            system="You are Nevsky ORB. Summarize operational text briefly and clearly in 2-4 bullet points.",
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"Summarize this text for an operational dashboard:
+
+{trimmed_text}"
+                }
+            ]
+        )
+    except Exception as e:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                user_id = get_default_user_id(cur)
+                write_ai_usage_log(
+                    cur,
+                    user_id=user_id,
+                    provider="anthropic",
+                    model=model_name,
+                    action_type="summary",
+                    input_chars=input_chars,
+                    status="error",
+                    error_message=str(e),
+                )
+                write_audit_log(
+                    cur,
+                    user_id=user_id,
+                    action_type="ai.summarize.failed",
+                    object_type="ai_request",
+                    execution_status="error",
+                    error_message=str(e),
+                )
+            conn.commit()
+        raise
 
     summary_text = ""
     if response.content and len(response.content) > 0:
-        summary_text = response.content[0].text
+        summary_text = "".join(
+            block.text for block in response.content if getattr(block, "type", "") == "text"
+        ).strip()
+
+    usage = getattr(response, "usage", None)
+    input_tokens = getattr(usage, "input_tokens", None) if usage else None
+    output_tokens = getattr(usage, "output_tokens", None) if usage else None
+
+    estimated_cost_usd = None
+    if input_tokens is not None and output_tokens is not None:
+        estimated_cost_usd = round((input_tokens / 1_000_000) * 0.80 + (output_tokens / 1_000_000) * 4.00, 8)
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             user_id = get_default_user_id(cur)
+            write_ai_usage_log(
+                cur,
+                user_id=user_id,
+                provider="anthropic",
+                model=model_name,
+                action_type="summary",
+                input_chars=input_chars,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                estimated_cost_usd=estimated_cost_usd,
+                status="success",
+            )
             write_audit_log(
                 cur,
                 user_id=user_id,
@@ -678,9 +780,13 @@ def ai_summarize(body: SummarizeRequest):
 
     return {
         "ok": True,
-        "model": "claude-3-5-haiku-latest",
+        "provider": "anthropic",
+        "model": model_name,
         "summary": summary_text,
-        "input_chars": len(trimmed_text),
+        "input_chars": input_chars,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "estimated_cost_usd": estimated_cost_usd,
     }
 
 @app.post("/ingest/telegram-update")
