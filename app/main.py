@@ -4,6 +4,7 @@ import os
 import json
 from datetime import datetime, timezone, timedelta
 import psycopg
+from anthropic import Anthropic
 
 app = FastAPI(title="Nevsky API", version="0.1.0")
 
@@ -65,8 +66,6 @@ def write_audit_log(
         ),
     )
 
-app = FastAPI(title="Nevsky API", version="0.1.0")
-
 class HealthResponse(BaseModel):
     status: str
     environment: str
@@ -76,6 +75,9 @@ class TaskEstimateRequest(BaseModel):
 
 class ReminderSnoozeRequest(BaseModel):
     minutes: int
+
+class SummarizeRequest(BaseModel):
+    text: str
 
 @app.get("/health", response_model=HealthResponse)
 def health():
@@ -632,6 +634,53 @@ def get_audit_logs():
             }
             for row in rows
         ],
+    }
+
+@app.post("/ai/summarize")
+def ai_summarize(body: SummarizeRequest):
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY is not set")
+
+    client = Anthropic(api_key=api_key)
+
+    trimmed_text = body.text.strip()[:4000]
+
+    response = client.messages.create(
+        model="claude-3-5-haiku-latest",
+        max_tokens=120,
+        temperature=0,
+        system="You are Nevsky ORB. Summarize operational text briefly and clearly in 2-4 bullet points.",
+        messages=[
+            {
+                "role": "user",
+                "content": f"Summarize this text for an operational dashboard:\\n\\n{trimmed_text}"
+            }
+        ]
+    )
+
+    summary_text = ""
+    if response.content and len(response.content) > 0:
+        summary_text = response.content[0].text
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            user_id = get_default_user_id(cur)
+            write_audit_log(
+                cur,
+                user_id=user_id,
+                action_type="ai.summarized",
+                object_type="ai_request",
+                recommendation_summary=summary_text,
+                human_decision="anthropic_summary",
+            )
+        conn.commit()
+
+    return {
+        "ok": True,
+        "model": "claude-3-5-haiku-latest",
+        "summary": summary_text,
+        "input_chars": len(trimmed_text),
     }
 
 @app.post("/ingest/telegram-update")
