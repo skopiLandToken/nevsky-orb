@@ -145,20 +145,11 @@ def generate_daily_plan():
                     updated_at = NOW()
                 RETURNING id
                 """,
-                (
-                    "skopi",
-                    user_id,
-                    plan_date,
-                    summary,
-                    "draft",
-                ),
+                ("skopi", user_id, plan_date, summary, "draft"),
             )
             daily_plan_id = cur.fetchone()[0]
 
-            cur.execute(
-                "DELETE FROM daily_plan_items WHERE daily_plan_id = %s",
-                (daily_plan_id,),
-            )
+            cur.execute("DELETE FROM daily_plan_items WHERE daily_plan_id = %s", (daily_plan_id,))
 
             for idx, task in enumerate(tasks, start=1):
                 cur.execute(
@@ -380,6 +371,54 @@ def estimate_task(task_id: str, body: TaskEstimateRequest):
             "id": str(task[0]),
             "title": task[1],
             "estimated_duration_minutes": task[2],
+        },
+    }
+
+@app.post("/tasks/{task_id}/complete")
+def complete_task(task_id: str):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            user_id = get_default_user_id(cur)
+
+            cur.execute(
+                """
+                UPDATE tasks
+                SET status = 'completed',
+                    actual_duration_minutes = COALESCE(actual_duration_minutes, estimated_duration_minutes),
+                    updated_at = NOW()
+                WHERE id = %s AND user_id = %s
+                RETURNING id, title, status, actual_duration_minutes
+                """,
+                (task_id, user_id),
+            )
+            task = cur.fetchone()
+
+            if not task:
+                raise HTTPException(status_code=404, detail="Task not found")
+
+            cur.execute(
+                """
+                UPDATE daily_plan_items dpi
+                SET status = 'completed',
+                    updated_at = NOW()
+                FROM daily_plans dp
+                WHERE dpi.daily_plan_id = dp.id
+                  AND dpi.task_id = %s
+                  AND dp.user_id = %s
+                  AND dp.plan_date = %s
+                """,
+                (task_id, user_id, datetime.now(timezone.utc).date()),
+            )
+
+        conn.commit()
+
+    return {
+        "ok": True,
+        "task": {
+            "id": str(task[0]),
+            "title": task[1],
+            "status": task[2],
+            "actual_duration_minutes": task[3],
         },
     }
 
