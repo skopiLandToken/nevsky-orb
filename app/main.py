@@ -708,9 +708,9 @@ def ai_summarize(body: SummarizeRequest):
             messages=[
                 {
                     "role": "user",
-                    "content": f"Summarize this text for an operational dashboard:
+                    "content": f"""Summarize this text for an operational dashboard:
 
-{trimmed_text}"
+{trimmed_text}"""
                 }
             ]
         )

@@ -27,3 +27,17 @@ The API health endpoint still needs verification because curl returned an empty 
 - Commit repo structure
 - Fix API health response
 - Create schema v1
+
+## AI summarize repair
+- Fixed broken `app/main.py` f-string in `/ai/summarize`
+- Cause: malformed multiline prompt string during auto-edit
+- Result: API import crash and connection resets
+- Fix: changed prompt content to a valid triple-quoted f-string
+- Verified:
+  - `/health` works again
+  - `/ai/summarize` returns success
+  - `ai_usage_logs` now records provider, model, tokens, and estimated cost
+
+## Why this matters
+Iosif wanted cost-aware AI usage tracking built in from the start.
+This repair restored the first working AI summary + cost logging path for Nevsky ORB.
