@@ -15,6 +15,14 @@ def get_db_connection():
         password=os.getenv("POSTGRES_PASSWORD", "change_me_now"),
     )
 
+def get_default_user_id(cur):
+    cur.execute(
+        "SELECT id FROM users WHERE email = %s LIMIT 1",
+        ("iosifskorohodov@gmail.com",),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
 class HealthResponse(BaseModel):
     status: str
     environment: str
@@ -29,6 +37,65 @@ def health():
 @app.get("/ready")
 def ready():
     return {"ready": True}
+
+@app.get("/today")
+def today():
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            user_id = get_default_user_id(cur)
+
+            cur.execute(
+                """
+                SELECT id, title, category, status, priority, created_at
+                FROM tasks
+                WHERE user_id = %s
+                  AND status NOT IN ('completed', 'canceled', 'archived')
+                ORDER BY created_at DESC
+                LIMIT 20
+                """,
+                (user_id,),
+            )
+            tasks = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT id, title, category, status, next_trigger_at, created_at
+                FROM reminders
+                WHERE user_id = %s
+                  AND status NOT IN ('completed', 'canceled')
+                ORDER BY next_trigger_at ASC NULLS LAST, created_at DESC
+                LIMIT 20
+                """,
+                (user_id,),
+            )
+            reminders = cur.fetchall()
+
+    return {
+        "ok": True,
+        "date": datetime.now(timezone.utc).date().isoformat(),
+        "tasks": [
+            {
+                "id": str(row[0]),
+                "title": row[1],
+                "category": row[2],
+                "status": row[3],
+                "priority": row[4],
+                "created_at": row[5].isoformat() if row[5] else None,
+            }
+            for row in tasks
+        ],
+        "reminders": [
+            {
+                "id": str(row[0]),
+                "title": row[1],
+                "category": row[2],
+                "status": row[3],
+                "next_trigger_at": row[4].isoformat() if row[4] else None,
+                "created_at": row[5].isoformat() if row[5] else None,
+            }
+            for row in reminders
+        ],
+    }
 
 @app.post("/ingest/telegram-update")
 async def ingest_telegram_update(request: Request):
@@ -50,13 +117,7 @@ async def ingest_telegram_update(request: Request):
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id FROM users WHERE email = %s LIMIT 1",
-                ("iosifskorohodov@gmail.com",),
-            )
-            row = cur.fetchone()
-            if row:
-                owner_user_id = row[0]
+            owner_user_id = get_default_user_id(cur)
 
             cur.execute(
                 """
