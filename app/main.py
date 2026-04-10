@@ -27,6 +27,9 @@ class HealthResponse(BaseModel):
     status: str
     environment: str
 
+class TaskEstimateRequest(BaseModel):
+    minutes: int
+
 @app.get("/health", response_model=HealthResponse)
 def health():
     return HealthResponse(
@@ -46,7 +49,7 @@ def today():
 
             cur.execute(
                 """
-                SELECT id, title, category, status, priority, created_at
+                SELECT id, title, category, status, priority, estimated_duration_minutes, created_at
                 FROM tasks
                 WHERE user_id = %s
                   AND status NOT IN ('completed', 'canceled', 'archived')
@@ -80,7 +83,8 @@ def today():
                 "category": row[2],
                 "status": row[3],
                 "priority": row[4],
-                "created_at": row[5].isoformat() if row[5] else None,
+                "estimated_duration_minutes": row[5],
+                "created_at": row[6].isoformat() if row[6] else None,
             }
             for row in tasks
         ],
@@ -222,7 +226,7 @@ def get_today_daily_plan():
             cur.execute(
                 """
                 SELECT id, position, item_type, title, short_note,
-                       estimated_duration_minutes, accepted_duration_minutes, status
+                       estimated_duration_minutes, accepted_duration_minutes, status, task_id
                 FROM daily_plan_items
                 WHERE daily_plan_id = %s
                 ORDER BY position ASC
@@ -252,6 +256,7 @@ def get_today_daily_plan():
                 "estimated_duration_minutes": row[5],
                 "accepted_duration_minutes": row[6],
                 "status": row[7],
+                "task_id": str(row[8]) if row[8] else None,
             }
             for row in items
         ],
@@ -328,6 +333,53 @@ def start_today_daily_plan():
             "status": plan[2],
             "accepted_at": plan[3].isoformat() if plan[3] else None,
             "started_at": plan[4].isoformat() if plan[4] else None,
+        },
+    }
+
+@app.post("/tasks/{task_id}/estimate")
+def estimate_task(task_id: str, body: TaskEstimateRequest):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            user_id = get_default_user_id(cur)
+
+            cur.execute(
+                """
+                UPDATE tasks
+                SET estimated_duration_minutes = %s,
+                    requested_duration_input = FALSE,
+                    updated_at = NOW()
+                WHERE id = %s AND user_id = %s
+                RETURNING id, title, estimated_duration_minutes
+                """,
+                (body.minutes, task_id, user_id),
+            )
+            task = cur.fetchone()
+
+            if not task:
+                raise HTTPException(status_code=404, detail="Task not found")
+
+            cur.execute(
+                """
+                UPDATE daily_plan_items dpi
+                SET accepted_duration_minutes = %s,
+                    updated_at = NOW()
+                FROM daily_plans dp
+                WHERE dpi.daily_plan_id = dp.id
+                  AND dpi.task_id = %s
+                  AND dp.user_id = %s
+                  AND dp.plan_date = %s
+                """,
+                (body.minutes, task_id, user_id, datetime.now(timezone.utc).date()),
+            )
+
+        conn.commit()
+
+    return {
+        "ok": True,
+        "task": {
+            "id": str(task[0]),
+            "title": task[1],
+            "estimated_duration_minutes": task[2],
         },
     }
 
