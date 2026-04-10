@@ -30,6 +30,9 @@ class HealthResponse(BaseModel):
 class TaskEstimateRequest(BaseModel):
     minutes: int
 
+class ReminderSnoozeRequest(BaseModel):
+    minutes: int
+
 @app.get("/health", response_model=HealthResponse)
 def health():
     return HealthResponse(
@@ -419,6 +422,73 @@ def complete_task(task_id: str):
             "title": task[1],
             "status": task[2],
             "actual_duration_minutes": task[3],
+        },
+    }
+
+@app.post("/reminders/{reminder_id}/ack")
+def acknowledge_reminder(reminder_id: str):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            user_id = get_default_user_id(cur)
+
+            cur.execute(
+                """
+                UPDATE reminders
+                SET status = 'completed',
+                    updated_at = NOW()
+                WHERE id = %s AND user_id = %s
+                RETURNING id, title, status
+                """,
+                (reminder_id, user_id),
+            )
+            reminder = cur.fetchone()
+
+        conn.commit()
+
+    if not reminder:
+        raise HTTPException(status_code=404, detail="Reminder not found")
+
+    return {
+        "ok": True,
+        "reminder": {
+            "id": str(reminder[0]),
+            "title": reminder[1],
+            "status": reminder[2],
+        },
+    }
+
+@app.post("/reminders/{reminder_id}/snooze")
+def snooze_reminder(reminder_id: str, body: ReminderSnoozeRequest):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            user_id = get_default_user_id(cur)
+            next_trigger_at = datetime.now(timezone.utc) + timedelta(minutes=body.minutes)
+
+            cur.execute(
+                """
+                UPDATE reminders
+                SET status = 'pending',
+                    next_trigger_at = %s,
+                    updated_at = NOW()
+                WHERE id = %s AND user_id = %s
+                RETURNING id, title, status, next_trigger_at
+                """,
+                (next_trigger_at, reminder_id, user_id),
+            )
+            reminder = cur.fetchone()
+
+        conn.commit()
+
+    if not reminder:
+        raise HTTPException(status_code=404, detail="Reminder not found")
+
+    return {
+        "ok": True,
+        "reminder": {
+            "id": str(reminder[0]),
+            "title": reminder[1],
+            "status": reminder[2],
+            "next_trigger_at": reminder[3].isoformat() if reminder[3] else None,
         },
     }
 
