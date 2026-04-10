@@ -23,6 +23,50 @@ def get_default_user_id(cur):
     row = cur.fetchone()
     return row[0] if row else None
 
+def write_audit_log(
+    cur,
+    user_id,
+    action_type,
+    object_type,
+    object_id=None,
+    event_id=None,
+    recommendation_summary=None,
+    human_decision=None,
+    execution_status="success",
+    error_message=None,
+):
+    cur.execute(
+        """
+        INSERT INTO audit_logs (
+            tenant_id,
+            user_id,
+            event_id,
+            action_type,
+            object_type,
+            object_id,
+            recommendation_summary,
+            human_decision,
+            execution_status,
+            error_message
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            "skopi",
+            user_id,
+            event_id,
+            action_type,
+            object_type,
+            object_id,
+            recommendation_summary,
+            human_decision,
+            execution_status,
+            error_message,
+        ),
+    )
+
+app = FastAPI(title="Nevsky API", version="0.1.0")
+
 class HealthResponse(BaseModel):
     status: str
     environment: str
@@ -185,6 +229,16 @@ def generate_daily_plan():
                     ),
                 )
 
+            write_audit_log(
+                cur,
+                user_id=user_id,
+                action_type="daily_plan.generated",
+                object_type="daily_plan",
+                object_id=daily_plan_id,
+                recommendation_summary=summary,
+                human_decision="generated",
+            )
+
         conn.commit()
 
     return {
@@ -277,10 +331,19 @@ def accept_today_daily_plan():
             )
             plan = cur.fetchone()
 
-        conn.commit()
+            if not plan:
+                raise HTTPException(status_code=404, detail="No daily plan found for today")
 
-    if not plan:
-        raise HTTPException(status_code=404, detail="No daily plan found for today")
+            write_audit_log(
+                cur,
+                user_id=user_id,
+                action_type="daily_plan.accepted",
+                object_type="daily_plan",
+                object_id=plan[0],
+                human_decision="accepted",
+            )
+
+        conn.commit()
 
     return {
         "ok": True,
@@ -314,10 +377,19 @@ def start_today_daily_plan():
             )
             plan = cur.fetchone()
 
-        conn.commit()
+            if not plan:
+                raise HTTPException(status_code=404, detail="No daily plan found for today")
 
-    if not plan:
-        raise HTTPException(status_code=404, detail="No daily plan found for today")
+            write_audit_log(
+                cur,
+                user_id=user_id,
+                action_type="daily_plan.started",
+                object_type="daily_plan",
+                object_id=plan[0],
+                human_decision="started",
+            )
+
+        conn.commit()
 
     return {
         "ok": True,
@@ -364,6 +436,15 @@ def estimate_task(task_id: str, body: TaskEstimateRequest):
                   AND dp.plan_date = %s
                 """,
                 (body.minutes, task_id, user_id, datetime.now(timezone.utc).date()),
+            )
+
+            write_audit_log(
+                cur,
+                user_id=user_id,
+                action_type="task.estimated",
+                object_type="task",
+                object_id=task[0],
+                human_decision=f"estimated_{body.minutes}_minutes",
             )
 
         conn.commit()
@@ -413,6 +494,15 @@ def complete_task(task_id: str):
                 (task_id, user_id, datetime.now(timezone.utc).date()),
             )
 
+            write_audit_log(
+                cur,
+                user_id=user_id,
+                action_type="task.completed",
+                object_type="task",
+                object_id=task[0],
+                human_decision="completed",
+            )
+
         conn.commit()
 
     return {
@@ -443,10 +533,19 @@ def acknowledge_reminder(reminder_id: str):
             )
             reminder = cur.fetchone()
 
-        conn.commit()
+            if not reminder:
+                raise HTTPException(status_code=404, detail="Reminder not found")
 
-    if not reminder:
-        raise HTTPException(status_code=404, detail="Reminder not found")
+            write_audit_log(
+                cur,
+                user_id=user_id,
+                action_type="reminder.acknowledged",
+                object_type="reminder",
+                object_id=reminder[0],
+                human_decision="acknowledged",
+            )
+
+        conn.commit()
 
     return {
         "ok": True,
@@ -477,10 +576,19 @@ def snooze_reminder(reminder_id: str, body: ReminderSnoozeRequest):
             )
             reminder = cur.fetchone()
 
-        conn.commit()
+            if not reminder:
+                raise HTTPException(status_code=404, detail="Reminder not found")
 
-    if not reminder:
-        raise HTTPException(status_code=404, detail="Reminder not found")
+            write_audit_log(
+                cur,
+                user_id=user_id,
+                action_type="reminder.snoozed",
+                object_type="reminder",
+                object_id=reminder[0],
+                human_decision=f"snoozed_{body.minutes}_minutes",
+            )
+
+        conn.commit()
 
     return {
         "ok": True,
@@ -490,6 +598,40 @@ def snooze_reminder(reminder_id: str, body: ReminderSnoozeRequest):
             "status": reminder[2],
             "next_trigger_at": reminder[3].isoformat() if reminder[3] else None,
         },
+    }
+
+@app.get("/audit-logs")
+def get_audit_logs():
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            user_id = get_default_user_id(cur)
+
+            cur.execute(
+                """
+                SELECT id, action_type, object_type, object_id, human_decision, execution_status, created_at
+                FROM audit_logs
+                WHERE user_id = %s
+                ORDER BY created_at DESC
+                LIMIT 50
+                """,
+                (user_id,),
+            )
+            rows = cur.fetchall()
+
+    return {
+        "ok": True,
+        "logs": [
+            {
+                "id": str(row[0]),
+                "action_type": row[1],
+                "object_type": row[2],
+                "object_id": str(row[3]) if row[3] else None,
+                "human_decision": row[4],
+                "execution_status": row[5],
+                "created_at": row[6].isoformat() if row[6] else None,
+            }
+            for row in rows
+        ],
     }
 
 @app.post("/ingest/telegram-update")
@@ -578,6 +720,16 @@ async def ingest_telegram_update(request: Request):
                     task_id = cur.fetchone()[0]
                     task_created = True
 
+                    write_audit_log(
+                        cur,
+                        user_id=owner_user_id,
+                        event_id=event_id,
+                        action_type="task.created",
+                        object_type="task",
+                        object_id=task_id,
+                        human_decision="created_from_telegram",
+                    )
+
             elif text.lower().startswith("/remind "):
                 title = text[8:].strip()
                 if title:
@@ -612,6 +764,16 @@ async def ingest_telegram_update(request: Request):
                     )
                     reminder_id = cur.fetchone()[0]
                     reminder_created = True
+
+                    write_audit_log(
+                        cur,
+                        user_id=owner_user_id,
+                        event_id=event_id,
+                        action_type="reminder.created",
+                        object_type="reminder",
+                        object_id=reminder_id,
+                        human_decision="created_from_telegram",
+                    )
 
         conn.commit()
 
