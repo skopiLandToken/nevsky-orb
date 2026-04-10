@@ -647,7 +647,7 @@ def ai_summarize(body: SummarizeRequest):
     trimmed_text = body.text.strip()[:4000]
 
     response = client.messages.create(
-        model="claude-3-5-sonnet-latest",
+        model="claude-haiku-4-5",
         max_tokens=120,
         temperature=0,
         system="You are Nevsky ORB. Summarize operational text briefly and clearly in 2-4 bullet points.",
