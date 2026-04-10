@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel
 import os
 import json
@@ -136,6 +136,8 @@ def generate_daily_plan():
                 DO UPDATE SET
                     summary = EXCLUDED.summary,
                     status = 'draft',
+                    accepted_at = NULL,
+                    started_at = NULL,
                     updated_at = NOW()
                 RETURNING id
                 """,
@@ -253,6 +255,80 @@ def get_today_daily_plan():
             }
             for row in items
         ],
+    }
+
+@app.post("/daily-plans/accept")
+def accept_today_daily_plan():
+    plan_date = datetime.now(timezone.utc).date()
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            user_id = get_default_user_id(cur)
+
+            cur.execute(
+                """
+                UPDATE daily_plans
+                SET status = 'accepted',
+                    accepted_at = NOW(),
+                    updated_at = NOW()
+                WHERE user_id = %s AND plan_date = %s
+                RETURNING id, plan_date, status, accepted_at, started_at
+                """,
+                (user_id, plan_date),
+            )
+            plan = cur.fetchone()
+
+        conn.commit()
+
+    if not plan:
+        raise HTTPException(status_code=404, detail="No daily plan found for today")
+
+    return {
+        "ok": True,
+        "plan": {
+            "id": str(plan[0]),
+            "plan_date": plan[1].isoformat() if plan[1] else None,
+            "status": plan[2],
+            "accepted_at": plan[3].isoformat() if plan[3] else None,
+            "started_at": plan[4].isoformat() if plan[4] else None,
+        },
+    }
+
+@app.post("/daily-plans/start")
+def start_today_daily_plan():
+    plan_date = datetime.now(timezone.utc).date()
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            user_id = get_default_user_id(cur)
+
+            cur.execute(
+                """
+                UPDATE daily_plans
+                SET status = 'started',
+                    started_at = NOW(),
+                    updated_at = NOW()
+                WHERE user_id = %s AND plan_date = %s
+                RETURNING id, plan_date, status, accepted_at, started_at
+                """,
+                (user_id, plan_date),
+            )
+            plan = cur.fetchone()
+
+        conn.commit()
+
+    if not plan:
+        raise HTTPException(status_code=404, detail="No daily plan found for today")
+
+    return {
+        "ok": True,
+        "plan": {
+            "id": str(plan[0]),
+            "plan_date": plan[1].isoformat() if plan[1] else None,
+            "status": plan[2],
+            "accepted_at": plan[3].isoformat() if plan[3] else None,
+            "started_at": plan[4].isoformat() if plan[4] else None,
+        },
     }
 
 @app.post("/ingest/telegram-update")
