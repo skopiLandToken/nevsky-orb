@@ -769,7 +769,7 @@ def ai_summarize(body: SummarizeRequest):
                 user_id=user_id,
                 provider="anthropic",
                 model=model_name,
-                action_type="summary",
+                action_type=f"summary:{strength}",
                 input_chars=input_chars,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
