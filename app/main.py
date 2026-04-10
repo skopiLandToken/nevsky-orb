@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel
 import os
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import psycopg
 
 app = FastAPI(title="Nevsky API", version="0.1.0")
@@ -44,6 +44,8 @@ async def ingest_telegram_update(request: Request):
 
     task_created = False
     task_id = None
+    reminder_created = False
+    reminder_id = None
     owner_user_id = None
 
     with get_db_connection() as conn:
@@ -120,6 +122,41 @@ async def ingest_telegram_update(request: Request):
                     task_id = cur.fetchone()[0]
                     task_created = True
 
+            elif text.lower().startswith("/remind "):
+                title = text[8:].strip()
+                if title:
+                    trigger_at = datetime.now(timezone.utc) + timedelta(hours=1)
+                    cur.execute(
+                        """
+                        INSERT INTO reminders (
+                            tenant_id,
+                            user_id,
+                            title,
+                            category,
+                            status,
+                            initial_trigger_at,
+                            next_trigger_at,
+                            ack_required,
+                            created_at,
+                            updated_at
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                        RETURNING id
+                        """,
+                        (
+                            "skopi",
+                            owner_user_id,
+                            title,
+                            "telegram",
+                            "pending",
+                            trigger_at,
+                            trigger_at,
+                            False,
+                        ),
+                    )
+                    reminder_id = cur.fetchone()[0]
+                    reminder_created = True
+
         conn.commit()
 
     return {
@@ -128,6 +165,8 @@ async def ingest_telegram_update(request: Request):
         "event_id": str(event_id),
         "task_created": task_created,
         "task_id": str(task_id) if task_id else None,
+        "reminder_created": reminder_created,
+        "reminder_id": str(reminder_id) if reminder_id else None,
         "received_at": datetime.now(timezone.utc).isoformat(),
         "top_level_keys": list(payload.keys()),
     }
