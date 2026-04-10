@@ -97,6 +97,164 @@ def today():
         ],
     }
 
+@app.post("/daily-plans/generate")
+def generate_daily_plan():
+    plan_date = datetime.now(timezone.utc).date()
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            user_id = get_default_user_id(cur)
+
+            cur.execute(
+                """
+                SELECT id, title, COALESCE(estimated_duration_minutes, 30)
+                FROM tasks
+                WHERE user_id = %s
+                  AND status NOT IN ('completed', 'canceled', 'archived')
+                ORDER BY created_at DESC
+                LIMIT 10
+                """,
+                (user_id,),
+            )
+            tasks = cur.fetchall()
+
+            summary = f"Daily plan for {plan_date.isoformat()} with {len(tasks)} task(s)."
+
+            cur.execute(
+                """
+                INSERT INTO daily_plans (
+                    tenant_id,
+                    user_id,
+                    plan_date,
+                    summary,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+                ON CONFLICT (user_id, plan_date)
+                DO UPDATE SET
+                    summary = EXCLUDED.summary,
+                    status = 'draft',
+                    updated_at = NOW()
+                RETURNING id
+                """,
+                (
+                    "skopi",
+                    user_id,
+                    plan_date,
+                    summary,
+                    "draft",
+                ),
+            )
+            daily_plan_id = cur.fetchone()[0]
+
+            cur.execute(
+                "DELETE FROM daily_plan_items WHERE daily_plan_id = %s",
+                (daily_plan_id,),
+            )
+
+            for idx, task in enumerate(tasks, start=1):
+                cur.execute(
+                    """
+                    INSERT INTO daily_plan_items (
+                        daily_plan_id,
+                        task_id,
+                        position,
+                        item_type,
+                        title,
+                        short_note,
+                        estimated_duration_minutes,
+                        accepted_duration_minutes,
+                        status,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                    """,
+                    (
+                        daily_plan_id,
+                        task[0],
+                        idx,
+                        "task",
+                        task[1],
+                        "Auto-generated from open task list",
+                        task[2],
+                        None,
+                        "planned",
+                    ),
+                )
+
+        conn.commit()
+
+    return {
+        "ok": True,
+        "daily_plan_id": str(daily_plan_id),
+        "plan_date": plan_date.isoformat(),
+        "task_count": len(tasks),
+        "summary": summary,
+    }
+
+@app.get("/daily-plans/today")
+def get_today_daily_plan():
+    plan_date = datetime.now(timezone.utc).date()
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            user_id = get_default_user_id(cur)
+
+            cur.execute(
+                """
+                SELECT id, plan_date, summary, status, accepted_at, started_at, created_at
+                FROM daily_plans
+                WHERE user_id = %s AND plan_date = %s
+                LIMIT 1
+                """,
+                (user_id, plan_date),
+            )
+            plan = cur.fetchone()
+
+            if not plan:
+                return {"ok": True, "plan": None, "items": []}
+
+            cur.execute(
+                """
+                SELECT id, position, item_type, title, short_note,
+                       estimated_duration_minutes, accepted_duration_minutes, status
+                FROM daily_plan_items
+                WHERE daily_plan_id = %s
+                ORDER BY position ASC
+                """,
+                (plan[0],),
+            )
+            items = cur.fetchall()
+
+    return {
+        "ok": True,
+        "plan": {
+            "id": str(plan[0]),
+            "plan_date": plan[1].isoformat() if plan[1] else None,
+            "summary": plan[2],
+            "status": plan[3],
+            "accepted_at": plan[4].isoformat() if plan[4] else None,
+            "started_at": plan[5].isoformat() if plan[5] else None,
+            "created_at": plan[6].isoformat() if plan[6] else None,
+        },
+        "items": [
+            {
+                "id": str(row[0]),
+                "position": row[1],
+                "item_type": row[2],
+                "title": row[3],
+                "short_note": row[4],
+                "estimated_duration_minutes": row[5],
+                "accepted_duration_minutes": row[6],
+                "status": row[7],
+            }
+            for row in items
+        ],
+    }
+
 @app.post("/ingest/telegram-update")
 async def ingest_telegram_update(request: Request):
     payload = await request.json()
