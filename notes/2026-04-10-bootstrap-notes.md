@@ -51,3 +51,13 @@ This repair restored the first working AI summary + cost logging path for Nevsky
 ## Why
 Iosif wants cheaper models used for simpler jobs and stronger models reserved for harder reasoning.
 This keeps Nevsky cost-aware without building a full routing engine yet.
+
+## AI routing v1
+- Added simple `strength` routing to `/ai/summarize`
+- `cheap` path is the default
+- `strong` path is available for harder summaries later
+- Logging now records action type as `summary:cheap` or `summary:strong`
+
+## Why
+Iosif wants cheaper models used for simpler jobs and stronger models reserved for harder reasoning.
+This keeps Nevsky cost-aware without building a full routing engine yet.
