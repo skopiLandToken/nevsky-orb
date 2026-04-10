@@ -41,3 +41,13 @@ The API health endpoint still needs verification because curl returned an empty 
 ## Why this matters
 Iosif wanted cost-aware AI usage tracking built in from the start.
 This repair restored the first working AI summary + cost logging path for Nevsky ORB.
+
+## AI routing v1
+- Added simple `strength` routing to `/ai/summarize`
+- `cheap` path is the default
+- `strong` path is available for harder summaries later
+- Logging now records action type as `summary:cheap` or `summary:strong`
+
+## Why
+Iosif wants cheaper models used for simpler jobs and stronger models reserved for harder reasoning.
+This keeps Nevsky cost-aware without building a full routing engine yet.

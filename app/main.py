@@ -130,6 +130,7 @@ class ReminderSnoozeRequest(BaseModel):
 
 class SummarizeRequest(BaseModel):
     text: str
+    strength: str | None = "cheap"
 
 @app.get("/health", response_model=HealthResponse)
 def health():
@@ -695,7 +696,14 @@ def ai_summarize(body: SummarizeRequest):
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY is not set")
 
     client = Anthropic(api_key=api_key)
-    model_name = "claude-haiku-4-5"
+
+    strength = (body.strength or "cheap").strip().lower()
+    if strength == "strong":
+        model_name = os.getenv("NEVSKY_SUMMARY_MODEL_STRONG", "claude-sonnet-4-20250514")
+    else:
+        strength = "cheap"
+        model_name = os.getenv("NEVSKY_SUMMARY_MODEL_CHEAP", "claude-haiku-4-5")
+
     trimmed_text = body.text.strip()[:4000]
     input_chars = len(trimmed_text)
 
@@ -723,7 +731,7 @@ def ai_summarize(body: SummarizeRequest):
                     user_id=user_id,
                     provider="anthropic",
                     model=model_name,
-                    action_type="summary",
+                    action_type=f"summary:{strength}",
                     input_chars=input_chars,
                     status="error",
                     error_message=str(e),
