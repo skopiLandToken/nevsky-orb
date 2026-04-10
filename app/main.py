@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
 import os
+import json
 from datetime import datetime, timezone
 import psycopg
 
@@ -34,19 +35,32 @@ async def ingest_telegram_update(request: Request):
     payload = await request.json()
 
     message = payload.get("message", {}) or {}
-    text = message.get("text")
+    text = (message.get("text") or "").strip()
     update_id = payload.get("update_id")
 
     summary = f"Telegram update {update_id}"
     if text:
         summary = f"Telegram message: {text[:200]}"
 
+    task_created = False
+    task_id = None
+    owner_user_id = None
+
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM users WHERE email = %s LIMIT 1",
+                ("iosifskorohodov@gmail.com",),
+            )
+            row = cur.fetchone()
+            if row:
+                owner_user_id = row[0]
+
             cur.execute(
                 """
                 INSERT INTO events (
                     tenant_id,
+                    user_id,
                     source_type,
                     event_type,
                     priority,
@@ -55,27 +69,65 @@ async def ingest_telegram_update(request: Request):
                     normalized_payload_json,
                     occurred_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
                 RETURNING id
                 """,
                 (
                     "skopi",
+                    owner_user_id,
                     "telegram",
                     "message.telegram.received",
                     "normal",
                     False,
                     summary,
-                    __import__("json").dumps(payload),
+                    json.dumps(payload),
                     datetime.now(timezone.utc),
                 ),
             )
             event_id = cur.fetchone()[0]
+
+            if text.lower().startswith("/task "):
+                title = text[6:].strip()
+                if title:
+                    cur.execute(
+                        """
+                        INSERT INTO tasks (
+                            tenant_id,
+                            user_id,
+                            title,
+                            description,
+                            category,
+                            status,
+                            priority,
+                            source_event_id,
+                            created_at,
+                            updated_at
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                        RETURNING id
+                        """,
+                        (
+                            "skopi",
+                            owner_user_id,
+                            title,
+                            f"Created from Telegram update {update_id}",
+                            "telegram",
+                            "created",
+                            "normal",
+                            event_id,
+                        ),
+                    )
+                    task_id = cur.fetchone()[0]
+                    task_created = True
+
         conn.commit()
 
     return {
         "ok": True,
         "source": "telegram",
         "event_id": str(event_id),
+        "task_created": task_created,
+        "task_id": str(task_id) if task_id else None,
         "received_at": datetime.now(timezone.utc).isoformat(),
         "top_level_keys": list(payload.keys()),
     }
