@@ -52,11 +52,11 @@ def fire_due_reminders():
                     return
 
                 for reminder_id, title, user_id, telegram_user_id in due:
-                    print(f"INFO: Firing reminder {reminder_id} — '{title}' for user {user_id}")
+                    print(f"INFO: Firing reminder {reminder_id} for user {user_id}")
                     if telegram_user_id:
                         send_telegram_message(
                             chat_id=telegram_user_id,
-                            text=f"🔔 Reminder: {title}",
+                            text=f"Reminder: {title}",
                         )
                     else:
                         print(f"WARN: No telegram_user_id for user {user_id}, skipping notify")
@@ -107,6 +107,42 @@ def get_email_body(msg) -> str:
             pass
     return body.strip()[:8000]
 
+def is_email_already_processed(message_id: str) -> bool:
+    if not message_id:
+        return False
+    try:
+        conn = get_db_connection()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM processed_emails WHERE message_id = %s LIMIT 1",
+                    (message_id,)
+                )
+                return cur.fetchone() is not None
+        conn.close()
+    except Exception as e:
+        print(f"ERROR: is_email_already_processed failed: {e}")
+        return False
+
+def mark_email_processed(message_id: str, sender_email: str, subject: str):
+    if not message_id:
+        return
+    try:
+        conn = get_db_connection()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO processed_emails (message_id, sender_email, subject)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (message_id) DO NOTHING
+                    """,
+                    (message_id, sender_email, subject)
+                )
+        conn.close()
+    except Exception as e:
+        print(f"ERROR: mark_email_processed failed: {e}")
+
 def poll_imap():
     host = os.getenv("IMAP_HOST", "")
     port = int(os.getenv("IMAP_PORT", 993))
@@ -122,13 +158,13 @@ def poll_imap():
         mail.login(user, password)
         mail.select("INBOX")
 
-        status, messages = mail.search(None, "UNSEEN")
+        status, messages = mail.search(None, "ALL")
         if not messages[0]:
             mail.logout()
             return
 
         msg_ids = messages[0].split()
-        print(f"INFO: Found {len(msg_ids)} unread email(s)")
+        print(f"INFO: Found {len(msg_ids)} email(s) in INBOX")
 
         for msg_id in msg_ids:
             try:
@@ -141,7 +177,10 @@ def poll_imap():
                 thread_id = msg.get("Message-ID", "").strip()
                 body = get_email_body(msg)
 
-                print(f"INFO: Processing email — '{subject}' from {sender}")
+                if is_email_already_processed(thread_id):
+                    continue
+
+                print(f"INFO: Processing email '{subject}' from {sender}")
 
                 payload = {
                     "owner_email": "iosif@skopi.io",
@@ -158,9 +197,10 @@ def poll_imap():
                 )
                 result = resp.json()
 
-                if result.get("ok"):
+                if result.get("ok") or result.get("filtered"):
+                    mark_email_processed(thread_id, sender, subject)
                     mail.store(msg_id, "+FLAGS", "\\Seen")
-                    print(f"INFO: Email ingested and marked read — thread {thread_id}")
+                    print(f"INFO: Email processed and marked read thread {thread_id}")
                 else:
                     print(f"WARN: Ingest returned not-ok: {result}")
 
