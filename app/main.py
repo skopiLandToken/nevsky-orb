@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import os
 import json
@@ -9,6 +10,10 @@ import httpx
 from anthropic import Anthropic
 
 app = FastAPI(title="Nevsky API", version="0.1.0")
+@app.get("/robots.txt", include_in_schema=False)
+async def robots():
+    return FileResponse("/app/robots.txt", media_type="text/plain")
+
 
 class HealthResponse(BaseModel):
     status: str
