@@ -298,6 +298,7 @@ def send_email_via_smtp(
     subject: str,
     body: str,
     from_address: str | None = None,
+    draft_id: str | None = None,
 ) -> dict:
     import smtplib
     from email.mime.text import MIMEText
@@ -318,6 +319,11 @@ def send_email_via_smtp(
         msg["From"] = smtp_from
         msg["To"] = to_address
         msg.attach(MIMEText(body, "plain"))
+        if draft_id:
+            base_url = os.getenv("ORB_BASE_URL", "https://nevsky.skopi.io")
+            pixel_url = f"{base_url}/track/email-open/{draft_id}"
+            html_body = f'<html><body><pre>{body}</pre><img src="{pixel_url}" width="1" height="1" style="display:none" /></body></html>'
+            msg.attach(MIMEText(html_body, "html"))
 
         with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:
             server.login(smtp_user, smtp_password)
@@ -1793,6 +1799,26 @@ def is_spam_email(sender_email: str, subject: str) -> tuple[bool, str]:
             return True, f"spam_subject_keyword:{kw}"
 
     return False, ""
+
+
+@app.get("/track/email-open/{draft_id}", include_in_schema=False)
+async def track_email_open(draft_id: str):
+    import base64
+    from fastapi.responses import Response as FastAPIResponse
+    gif_bytes = base64.b64decode(
+        "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+    )
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO audit_logs (tenant_id, action_type, object_type, object_id, execution_status) VALUES ('skopi', 'email_opened', 'email_draft', %s::uuid, 'success')",
+                    (draft_id,),
+                )
+                conn.commit()
+    except Exception:
+        pass
+    return FastAPIResponse(content=gif_bytes, media_type="image/gif")
 
 
 @app.post("/ingest/email/test")
