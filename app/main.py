@@ -2400,6 +2400,7 @@ async def process_telegram_callback_query(callback_query: dict):
             to_address=smtp_payload["to_addr"],
             subject="Re: " + smtp_payload["subject"],
             body=smtp_payload["body"],
+            draft_id=smtp_payload["draft_id"],
         )
         with get_db_connection() as conn:
             with conn.cursor() as cur:
