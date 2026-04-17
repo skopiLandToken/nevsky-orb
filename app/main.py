@@ -1701,6 +1701,52 @@ def admin_get_approvals(
     }
 
 
+SPAM_BLOCKED_SENDERS = {
+    "mailer-daemon@",
+    "postmaster@",
+    "noreply@",
+    "no-reply@",
+    "donotreply@",
+    "notifications@",
+    "bounce@",
+    "unsubscribe@",
+}
+
+SPAM_SUBJECT_KEYWORDS = [
+    "unsubscribe",
+    "click here",
+    "you have been selected",
+    "congratulations you won",
+    "limited time offer",
+    "act now",
+    "free money",
+    "make money fast",
+    "nigerian prince",
+    "wire transfer",
+    "invoice attached",
+    "your account has been suspended",
+    "verify your account",
+    "confirm your email",
+    "password reset",
+    "delivery failed",
+    "mailer-daemon",
+]
+
+def is_spam_email(sender_email: str, subject: str) -> tuple[bool, str]:
+    sender_lower = sender_email.strip().lower()
+    subject_lower = subject.strip().lower()
+
+    for blocked in SPAM_BLOCKED_SENDERS:
+        if sender_lower.startswith(blocked) or blocked in sender_lower:
+            return True, f"blocked_sender_pattern:{blocked}"
+
+    for kw in SPAM_SUBJECT_KEYWORDS:
+        if kw in subject_lower:
+            return True, f"spam_subject_keyword:{kw}"
+
+    return False, ""
+
+
 @app.post("/ingest/email/test")
 async def ingest_email_test(body: IngestEmailRequest):
     owner_email = body.owner_email.strip().lower()
@@ -1710,6 +1756,16 @@ async def ingest_email_test(body: IngestEmailRequest):
     thread_id = body.thread_id.strip() if body.thread_id else None
     contact_email = body.contact_email.strip().lower() if body.contact_email else None
     project_id = body.project_id.strip() if body.project_id else None
+
+    filtered, filter_reason = is_spam_email(sender_email, subject)
+    if filtered:
+        return {
+            "ok": False,
+            "filtered": True,
+            "reason": filter_reason,
+            "sender_email": sender_email,
+            "subject": subject,
+        }
 
     processed = build_email_summary_and_draft_ai_first(
         subject,
