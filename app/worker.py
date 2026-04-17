@@ -1,5 +1,8 @@
 import os
 import time
+import imaplib
+import email
+from email.header import decode_header
 import psycopg
 import httpx
 from datetime import datetime, timezone
@@ -50,7 +53,6 @@ def fire_due_reminders():
 
                 for reminder_id, title, user_id, telegram_user_id in due:
                     print(f"INFO: Firing reminder {reminder_id} — '{title}' for user {user_id}")
-
                     if telegram_user_id:
                         send_telegram_message(
                             chat_id=telegram_user_id,
@@ -72,10 +74,109 @@ def fire_due_reminders():
     except Exception as e:
         print(f"ERROR: fire_due_reminders failed: {e}")
 
+def decode_mime_header(value: str) -> str:
+    parts = decode_header(value)
+    decoded = []
+    for part, enc in parts:
+        if isinstance(part, bytes):
+            decoded.append(part.decode(enc or "utf-8", errors="replace"))
+        else:
+            decoded.append(part)
+    return "".join(decoded)
+
+def get_email_body(msg) -> str:
+    body = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            ct = part.get_content_type()
+            cd = str(part.get("Content-Disposition", ""))
+            if ct == "text/plain" and "attachment" not in cd:
+                try:
+                    body = part.get_payload(decode=True).decode(
+                        part.get_content_charset() or "utf-8", errors="replace"
+                    )
+                    break
+                except Exception:
+                    pass
+    else:
+        try:
+            body = msg.get_payload(decode=True).decode(
+                msg.get_content_charset() or "utf-8", errors="replace"
+            )
+        except Exception:
+            pass
+    return body.strip()[:8000]
+
+def poll_imap():
+    host = os.getenv("IMAP_HOST", "")
+    port = int(os.getenv("IMAP_PORT", 993))
+    user = os.getenv("IMAP_USER", "")
+    password = os.getenv("IMAP_PASSWORD", "")
+
+    if not host or not user or not password:
+        print("WARN: IMAP not configured, skipping")
+        return
+
+    try:
+        mail = imaplib.IMAP4_SSL(host, port)
+        mail.login(user, password)
+        mail.select("INBOX")
+
+        status, messages = mail.search(None, "UNSEEN")
+        if not messages[0]:
+            mail.logout()
+            return
+
+        msg_ids = messages[0].split()
+        print(f"INFO: Found {len(msg_ids)} unread email(s)")
+
+        for msg_id in msg_ids:
+            try:
+                status, data = mail.fetch(msg_id, "(RFC822)")
+                raw = data[0][1]
+                msg = email.message_from_bytes(raw)
+
+                subject = decode_mime_header(msg.get("Subject", "(no subject)"))
+                sender = msg.get("From", "unknown")
+                thread_id = msg.get("Message-ID", "").strip()
+                body = get_email_body(msg)
+
+                print(f"INFO: Processing email — '{subject}' from {sender}")
+
+                payload = {
+                    "owner_email": "iosif@skopi.io",
+                    "sender_email": sender,
+                    "subject": subject,
+                    "body": body,
+                    "thread_id": thread_id or None,
+                }
+
+                resp = httpx.post(
+                    "http://api:8080/ingest/email/test",
+                    json=payload,
+                    timeout=30,
+                )
+                result = resp.json()
+
+                if result.get("ok"):
+                    mail.store(msg_id, "+FLAGS", "\\Seen")
+                    print(f"INFO: Email ingested and marked read — thread {thread_id}")
+                else:
+                    print(f"WARN: Ingest returned not-ok: {result}")
+
+            except Exception as e:
+                print(f"ERROR: Failed to process email {msg_id}: {e}")
+
+        mail.logout()
+
+    except Exception as e:
+        print(f"ERROR: poll_imap failed: {e}")
+
 print("Nevsky worker started")
 print("Environment:", os.getenv("ENVIRONMENT", "unknown"))
 print(f"Poll interval: {POLL_INTERVAL}s")
 
 while True:
     fire_due_reminders()
+    poll_imap()
     time.sleep(POLL_INTERVAL)

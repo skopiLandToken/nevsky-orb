@@ -256,6 +256,160 @@ def get_user_id_for_telegram(cur, telegram_user_id):
 
 
 
+def write_audit_log(
+    cur,
+    user_id,
+    action_type: str,
+    object_type: str,
+    object_id=None,
+    recommendation_summary: str | None = None,
+    human_decision: str | None = None,
+    execution_status: str = "success",
+    error_message: str | None = None,
+):
+    cur.execute(
+        """
+        INSERT INTO audit_logs (
+            tenant_id, user_id, action_type, object_type, object_id,
+            recommendation_summary, human_decision, execution_status, error_message
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            "skopi",
+            user_id,
+            action_type,
+            object_type,
+            object_id,
+            recommendation_summary,
+            human_decision,
+            execution_status,
+            error_message,
+        ),
+    )
+
+
+def build_email_summary_and_draft_ai_first(
+    subject: str,
+    body: str,
+    thread_id: str | None = None,
+    contact_email: str | None = None,
+    project_id: str | None = None,
+) -> dict:
+    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        return {
+            "summary": f"Email received: {subject}",
+            "draft_reply": "Thank you for your email. I will get back to you shortly.",
+            "generation_mode": "fallback_no_api_key",
+        }
+    try:
+        client = Anthropic(api_key=api_key)
+        prompt = "Subject: " + subject + "\n\nBody:\n" + body[:3000]
+        response = client.messages.create(
+            model=os.getenv("NEVSKY_SUMMARY_MODEL_CHEAP", "claude-haiku-4-5"),
+            max_tokens=300,
+            temperature=0,
+            system="You are Nevsky ORB, an executive assistant AI. Given an incoming email, return exactly two sections: SUMMARY: A 1-2 sentence summary of what the email is about. DRAFT: A short professional draft reply (2-4 sentences). Use exactly those labels.",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = response.content[0].text.strip()
+        summary = ""
+        draft = ""
+        for line in text.splitlines():
+            if line.startswith("SUMMARY:"):
+                summary = line.replace("SUMMARY:", "").strip()
+            elif line.startswith("DRAFT:"):
+                draft = line.replace("DRAFT:", "").strip()
+        if not summary:
+            summary = f"Email received: {subject}"
+        if not draft:
+            draft = "Thank you for your email. I will get back to you shortly."
+        return {"summary": summary, "draft_reply": draft, "generation_mode": "anthropic"}
+    except Exception as e:
+        print(f"WARN: AI summary failed: {e}")
+        return {
+            "summary": f"Email received: {subject}",
+            "draft_reply": "Thank you for your email. I will get back to you shortly.",
+            "generation_mode": "fallback_error",
+        }
+
+
+async def create_email_approval_for_owner(
+    owner_email: str,
+    sender_email: str,
+    subject: str,
+    summary: str,
+    draft_reply: str,
+    thread_id: str | None = None,
+    contact_email: str | None = None,
+    project_id: str | None = None,
+) -> dict:
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, telegram_user_id FROM users WHERE email = %s LIMIT 1",
+                (owner_email,),
+            )
+            user_row = cur.fetchone()
+            if not user_row:
+                raise HTTPException(status_code=404, detail=f"Owner user not found: {owner_email}")
+            owner_user_id = user_row[0]
+            telegram_user_id = user_row[1]
+
+            cur.execute(
+                """
+                INSERT INTO email_drafts (
+                    tenant_id, owner_user_id, sender_email, subject,
+                    summary, draft_reply, status, thread_id, contact_email, project_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, 'draft', %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    "skopi", owner_user_id, sender_email, subject,
+                    summary, draft_reply, thread_id, contact_email, project_id,
+                ),
+            )
+            draft_id = cur.fetchone()[0]
+
+            cur.execute(
+                """
+                INSERT INTO approvals (
+                    tenant_id, user_id, approval_type, target_object_type,
+                    target_object_id, status, requested_at, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW(), NOW())
+                RETURNING id
+                """,
+                ("skopi", owner_user_id, "email_send", "email_draft", draft_id, "pending"),
+            )
+            approval_id = cur.fetchone()[0]
+
+            write_audit_log(
+                cur,
+                user_id=owner_user_id,
+                action_type="email.approval_requested",
+                object_type="approval",
+                object_id=approval_id,
+                recommendation_summary=summary,
+                human_decision="ingest_email",
+            )
+
+        conn.commit()
+
+    if telegram_user_id:
+        await send_telegram_message(
+            int(telegram_user_id),
+            build_email_approval_text(subject, sender_email, summary, draft_reply),
+            reply_markup=build_email_approval_reply_markup(approval_id),
+        )
+
+    return {
+        "email_draft_id": str(draft_id),
+        "approval_id": str(approval_id),
+        "owner_user_id": str(owner_user_id),
+        "telegram_notified": bool(telegram_user_id),
+    }
+
+
 async def resend_email_draft_approval_card(email_draft_id: str):
     with get_db_connection() as conn:
         with conn.cursor() as cur:
