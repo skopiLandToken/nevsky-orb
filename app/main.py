@@ -1554,6 +1554,50 @@ async def ingest_email_test(body: IngestEmailRequest):
     }
 
 
+@app.post("/ingest/skopi-event")
+async def ingest_skopi_event(request: Request):
+    secret = os.getenv("SKOPI_WEBHOOK_SECRET", "").strip()
+    incoming = request.headers.get("x-skopi-secret", "").strip()
+    if not secret or incoming != secret:
+        raise HTTPException(status_code=401, detail="Invalid or missing webhook secret")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
+
+    event_type = payload.get("event_type", "unknown")
+    source_entity_type = payload.get("source_entity_type")
+    source_entity_id = payload.get("source_entity_id")
+    event_key = payload.get("event_key")
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO app_skopi_events (
+                    event_key, event_type, source_entity_type,
+                    source_entity_id, raw_payload_json, processing_status
+                ) VALUES (%s, %s, %s, %s, %s, 'received')
+                ON CONFLICT (event_key) DO NOTHING
+                RETURNING id
+                """,
+                (
+                    event_key,
+                    event_type,
+                    source_entity_type,
+                    source_entity_id,
+                    json.dumps(payload),
+                ),
+            )
+            row = cur.fetchone()
+            conn.commit()
+
+    if row:
+        return {"ok": True, "event_id": str(row[0]), "status": "recorded"}
+    else:
+        return {"ok": True, "status": "duplicate_skipped"}
+
 @app.post("/telegram/test/send-email-approval")
 async def telegram_test_send_email_approval(
     owner_email: str | None = None,
