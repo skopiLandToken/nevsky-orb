@@ -288,6 +288,41 @@ def write_audit_log(
     )
 
 
+def send_email_via_smtp(
+    to_address: str,
+    subject: str,
+    body: str,
+    from_address: str | None = None,
+) -> dict:
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    smtp_host = os.getenv("SMTP_HOST", "mail.skopi.io")
+    smtp_port = int(os.getenv("SMTP_PORT", 465))
+    smtp_user = os.getenv("SMTP_USER", "")
+    smtp_password = os.getenv("SMTP_PASSWORD", "")
+    smtp_from = from_address or smtp_user
+
+    if not smtp_user or not smtp_password:
+        return {"ok": False, "error": "SMTP not configured"}
+
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = smtp_from
+        msg["To"] = to_address
+        msg.attach(MIMEText(body, "plain"))
+
+        with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:
+            server.login(smtp_user, smtp_password)
+            server.sendmail(smtp_from, [to_address], msg.as_string())
+
+        return {"ok": True, "to": to_address, "subject": subject}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def build_email_summary_and_draft_ai_first(
     subject: str,
     body: str,
@@ -2011,22 +2046,36 @@ async def process_telegram_callback_query(callback_query: dict):
                 )
                 row = cur.fetchone()
                 action_type = "email.sent_from_button"
+                smtp_payload = None
                 if row:
                     approval_id = row[0]
                     email_draft_id = row[1]
-
                     if email_draft_id:
                         cur.execute(
                             """
                             UPDATE email_drafts
-                            SET status = 'approved_for_send',
-                                updated_at = NOW()
+                            SET status = 'approved_for_send', updated_at = NOW()
                             WHERE id = %s
                             """,
                             (email_draft_id,),
                         )
-
-                    result_text = "Email approved for send. Stub only for now."
+                        cur.execute(
+                            "SELECT sender_email, subject, draft_reply FROM email_drafts WHERE id = %s LIMIT 1",
+                            (email_draft_id,),
+                        )
+                        draft_row = cur.fetchone()
+                        if draft_row:
+                            smtp_payload = {
+                                "to_addr": draft_row[0],
+                                "subject": draft_row[1],
+                                "body": draft_row[2],
+                                "draft_id": email_draft_id,
+                            }
+                            result_text = f"Sending email to {draft_row[0]}..."
+                        else:
+                            result_text = "Email draft not found."
+                    else:
+                        result_text = "No draft linked to approval."
                     write_audit_log(
                         cur,
                         user_id=user_id,
@@ -2215,6 +2264,30 @@ async def process_telegram_callback_query(callback_query: dict):
                     build_task_card_text(task_row[1], task_row[2], task_row[3]),
                     reply_markup=build_task_estimate_reply_markup(task_row[0]),
                 )
+
+    if action == "email_send" and smtp_payload:
+        send_result = send_email_via_smtp(
+            to_address=smtp_payload["to_addr"],
+            subject="Re: " + smtp_payload["subject"],
+            body=smtp_payload["body"],
+        )
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                if send_result["ok"]:
+                    cur.execute(
+                        "UPDATE email_drafts SET status = 'sent', updated_at = NOW() WHERE id = %s",
+                        (smtp_payload["draft_id"],),
+                    )
+                    if chat_id:
+                        await send_telegram_message(chat_id, f"✅ Email sent to {smtp_payload['to_addr']}.")
+                else:
+                    cur.execute(
+                        "UPDATE email_drafts SET status = 'send_failed', updated_at = NOW() WHERE id = %s",
+                        (smtp_payload["draft_id"],),
+                    )
+                    if chat_id:
+                        await send_telegram_message(chat_id, f"❌ Send failed: {send_result.get('error', 'unknown')}")
+            conn.commit()
 
     return {"ok": True, "callback_data": data, "result_text": result_text}
 
