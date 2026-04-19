@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import Header, FastAPI, Request, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import os
@@ -2730,3 +2730,139 @@ async def process_telegram_payload(payload: dict):
         "received_at": datetime.now(timezone.utc).isoformat(),
         "top_level_keys": list(payload.keys()),
     }
+
+
+# ============================================================
+# KB SYNC — Item 85
+# POST /kb/sync
+# Accepts a file from Yakov (Claude) and writes it to /opt/nevsky-dev/kb/
+# Auth: SKOPI_WEBHOOK_SECRET header
+# ============================================================
+
+class KBSyncRequest(BaseModel):
+    filename: str
+    content: str
+
+class KBSyncResponse(BaseModel):
+    status: str
+    filename: str
+    bytes_written: int
+    path: str
+    synced_at: str
+
+@app.post("/kb/sync", response_model=KBSyncResponse)
+async def kb_sync(request: KBSyncRequest, x_webhook_secret: str = Header(None)):
+    import os, datetime
+
+    # Auth check
+    expected_secret = os.environ.get("SKOPI_WEBHOOK_SECRET", "")
+    if not expected_secret or x_webhook_secret != expected_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Sanitize filename — no path traversal
+    filename = os.path.basename(request.filename)
+    if not filename or filename.startswith("."):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    # Write file
+    kb_dir = "/opt/nevsky-dev/kb"
+    os.makedirs(kb_dir, exist_ok=True)
+    file_path = os.path.join(kb_dir, filename)
+
+    content_bytes = request.content.encode("utf-8")
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(request.content)
+
+    synced_at = datetime.datetime.utcnow().isoformat() + "Z"
+
+    # Audit log
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                write_audit_log(
+                    cur=cur,
+                    user_id=None,
+                    action_type="kb.file_synced",
+                    object_type="kb_file",
+                    object_id=filename,
+                    recommendation_summary=f"Synced {len(content_bytes)} bytes to {file_path}"
+                )
+                conn.commit()
+    except Exception as e:
+        pass  # Don't fail the sync if audit log fails
+
+    return KBSyncResponse(
+        status="ok",
+        filename=filename,
+        bytes_written=len(content_bytes),
+        path=file_path,
+        synced_at=synced_at
+    )
+
+
+# ============================================================
+# KB SYNC — Item 85
+# POST /kb/sync
+# Accepts a file from Yakov (Claude) and writes it to /opt/nevsky-dev/kb/
+# Auth: SKOPI_WEBHOOK_SECRET header
+# ============================================================
+
+class KBSyncRequest(BaseModel):
+    filename: str
+    content: str
+
+class KBSyncResponse(BaseModel):
+    status: str
+    filename: str
+    bytes_written: int
+    path: str
+    synced_at: str
+
+@app.post("/kb/sync", response_model=KBSyncResponse)
+async def kb_sync(request: KBSyncRequest, x_webhook_secret: str = Header(None)):
+    import os, datetime
+
+    # Auth check
+    expected_secret = os.environ.get("SKOPI_WEBHOOK_SECRET", "")
+    if not expected_secret or x_webhook_secret != expected_secret:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Sanitize filename — no path traversal
+    filename = os.path.basename(request.filename)
+    if not filename or filename.startswith("."):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    # Write file
+    kb_dir = "/opt/nevsky-dev/kb"
+    os.makedirs(kb_dir, exist_ok=True)
+    file_path = os.path.join(kb_dir, filename)
+
+    content_bytes = request.content.encode("utf-8")
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(request.content)
+
+    synced_at = datetime.datetime.utcnow().isoformat() + "Z"
+
+    # Audit log
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                write_audit_log(
+                    cur=cur,
+                    user_id=None,
+                    action_type="kb.file_synced",
+                    object_type="kb_file",
+                    object_id=filename,
+                    recommendation_summary=f"Synced {len(content_bytes)} bytes to {file_path}"
+                )
+                conn.commit()
+    except Exception as e:
+        pass  # Don't fail the sync if audit log fails
+
+    return KBSyncResponse(
+        status="ok",
+        filename=filename,
+        bytes_written=len(content_bytes),
+        path=file_path,
+        synced_at=synced_at
+    )

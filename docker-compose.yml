@@ -45,6 +45,7 @@ services:
       - "${APP_PORT}:8080"
     volumes:
       - ./app:/app
+      - ./kb:/opt/nevsky-dev/kb
     depends_on:
       postgres:
         condition: service_healthy
