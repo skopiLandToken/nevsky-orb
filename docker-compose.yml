@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16
+    image: pgvector/pgvector:pg16
     container_name: nevsky-postgres
     restart: unless-stopped
     environment:
@@ -66,6 +66,21 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+
+  umami:
+    image: ghcr.io/umami-software/umami:postgresql-latest
+    container_name: nevsky-umami
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      DATABASE_URL: postgresql://nevsky:change_me_now@postgres:5432/umami_db
+      DATABASE_TYPE: postgresql
+      APP_SECRET: umami_secret_change_me_now
+      DISABLE_SECURITY_HEADERS: 1
+    depends_on:
+      postgres:
         condition: service_healthy
 
 volumes:
