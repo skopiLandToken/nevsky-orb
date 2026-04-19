@@ -1,3 +1,4 @@
+import json
 import os
 import time
 import imaplib
@@ -212,6 +213,95 @@ def poll_imap():
     except Exception as e:
         print(f"ERROR: poll_imap failed: {e}")
 
+
+def execute_yakov_tasks():
+    try:
+        conn = get_db_connection()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, session_id, task_type, payload_json
+                    FROM yakov_tasks
+                    WHERE status = 'pending'
+                    ORDER BY created_at ASC
+                    LIMIT 10
+                """)
+                tasks = cur.fetchall()
+
+                if not tasks:
+                    return
+
+                print(f"INFO: Found {len(tasks)} pending yakov_task(s)")
+
+                for task_id, session_id, task_type, payload in tasks:
+                    print(f"INFO: Executing task {task_id} type={task_type}")
+
+                    # Mark as running
+                    cur.execute("""
+                        UPDATE yakov_tasks
+                        SET status = 'running', executed_at = NOW()
+                        WHERE id = %s
+                    """, (task_id,))
+                    conn.commit()
+
+                    try:
+                        result = dispatch_yakov_task(task_type, payload)
+                        cur.execute("""
+                            UPDATE yakov_tasks
+                            SET status = 'done',
+                                result_json = %s,
+                                executed_at = NOW()
+                            WHERE id = %s
+                        """, (json.dumps(result), task_id))
+                        print(f"INFO: Task {task_id} completed ok")
+
+                    except Exception as task_err:
+                        cur.execute("""
+                            UPDATE yakov_tasks
+                            SET status = 'failed',
+                                error_message = %s,
+                                executed_at = NOW()
+                            WHERE id = %s
+                        """, (str(task_err), task_id))
+                        print(f"ERROR: Task {task_id} failed: {task_err}")
+
+                    conn.commit()
+
+        conn.close()
+
+    except Exception as e:
+        print(f"ERROR: execute_yakov_tasks failed: {e}")
+
+
+def dispatch_yakov_task(task_type: str, payload: dict) -> dict:
+    """
+    Route task_type to the correct handler.
+    Add new task types here as the engine grows.
+    """
+    if task_type == "send_telegram":
+        chat_id = payload.get("chat_id", "")
+        text = payload.get("text", "")
+        if not chat_id or not text:
+            raise ValueError("send_telegram requires chat_id and text")
+        send_telegram_message(chat_id, text)
+        return {"sent": True, "chat_id": chat_id}
+
+    elif task_type == "http_post":
+        url = payload.get("url", "")
+        body = payload.get("body", {})
+        if not url:
+            raise ValueError("http_post requires url")
+        resp = httpx.post(url, json=body, timeout=30)
+        return {"status_code": resp.status_code, "body": resp.text[:500]}
+
+    elif task_type == "log_note":
+        note = payload.get("note", "")
+        print(f"INFO: [yakov_task log_note] {note}")
+        return {"logged": True, "note": note}
+
+    else:
+        raise ValueError(f"Unknown task_type: {task_type}")
+
 print("Nevsky worker started")
 print("Environment:", os.getenv("ENVIRONMENT", "unknown"))
 print(f"Poll interval: {POLL_INTERVAL}s")
@@ -219,4 +309,5 @@ print(f"Poll interval: {POLL_INTERVAL}s")
 while True:
     fire_due_reminders()
     poll_imap()
+    execute_yakov_tasks()
     time.sleep(POLL_INTERVAL)
