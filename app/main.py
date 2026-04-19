@@ -1,4 +1,5 @@
 from fastapi import Header, FastAPI, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import os
@@ -10,6 +11,14 @@ import httpx
 from anthropic import Anthropic
 
 app = FastAPI(title="Nevsky API", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 @app.get("/robots.txt", include_in_schema=False)
 async def robots():
     return FileResponse("/app/robots.txt", media_type="text/plain")
@@ -160,6 +169,18 @@ def build_email_approval_text(subject: str, sender: str, summary: str, draft_rep
         f"Draft reply:\n{draft_reply}\n\n"
         f"Choose an action below."
     )
+
+
+def build_help_text():
+    return (
+        "Nevsky ORB — available commands:\n\n"
+        "/today — daily briefing and task summary\n"
+        "/task <title> — create a new task\n"
+        "/remind <what> <when> — set a reminder\n"
+        "/kb — list files in KB directory\n"
+        "/help — show this message"
+    )
+
 
 def build_daily_briefing_text(cur, user_id):
     cur.execute(
@@ -2657,6 +2678,20 @@ async def process_telegram_payload(payload: dict):
                     "/remind check payout issue in 30 minutes"
                 )
 
+
+            elif text.lower() == "/kb":
+                import os
+                kb_dir = "/opt/nevsky-dev/kb"
+                try:
+                    files = sorted(os.listdir(kb_dir))
+                    if files:
+                        file_list = "\n".join(f"  {f}" for f in files)
+                        reply_text = f"KB directory ({len(files)} files):\n{file_list}"
+                    else:
+                        reply_text = "KB directory is empty."
+                except Exception as e:
+                    reply_text = f"Could not read KB directory: {e}"
+
             elif text.startswith("/") and not (
                 text.lower().startswith("/start")
                 or text.lower().startswith("/help")
@@ -2665,6 +2700,7 @@ async def process_telegram_payload(payload: dict):
                 or text.lower() == "/task"
                 or text.lower().startswith("/remind ")
                 or text.lower() == "/remind"
+                or text.lower() == "/kb"
             ):
                 reply_text = "Unknown command. Send /help to see available commands."
 
