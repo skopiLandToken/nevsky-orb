@@ -261,6 +261,58 @@ def get_user_id_for_telegram(cur, telegram_user_id):
 
 
 
+def write_ai_usage_log(
+    cur,
+    user_id,
+    provider,
+    model,
+    action_type,
+    input_chars,
+    input_tokens=None,
+    output_tokens=None,
+    estimated_cost_usd=None,
+    object_type=None,
+    object_id=None,
+    status="success",
+    error_message=None,
+):
+    cur.execute(
+        """
+        INSERT INTO ai_usage_logs (
+            tenant_id,
+            user_id,
+            provider,
+            model,
+            action_type,
+            object_type,
+            object_id,
+            input_chars,
+            input_tokens,
+            output_tokens,
+            estimated_cost_usd,
+            status,
+            error_message
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            "skopi",
+            user_id,
+            provider,
+            model,
+            action_type,
+            object_type,
+            object_id,
+            input_chars,
+            input_tokens,
+            output_tokens,
+            estimated_cost_usd,
+            status,
+            error_message,
+        ),
+    )
+
+
 def write_audit_log(
     cur,
     user_id,
@@ -300,40 +352,39 @@ def send_email_via_smtp(
     from_address: str | None = None,
     draft_id: str | None = None,
 ) -> dict:
-    import smtplib
-    from email.mime.text import MIMEText
-    from email.mime.multipart import MIMEMultipart
-
-    smtp_host = os.getenv("SMTP_HOST", "mail.skopi.io")
-    smtp_port = int(os.getenv("SMTP_PORT", 465))
-    smtp_user = os.getenv("SMTP_USER", "")
-    smtp_password = os.getenv("SMTP_PASSWORD", "")
-    smtp_from = from_address or smtp_user
-
-    if not smtp_user or not smtp_password:
-        return {"ok": False, "error": "SMTP not configured"}
-
+    resend_api_key = os.getenv('RESEND_API_KEY', '')
+    if not resend_api_key:
+        return {'ok': False, 'error': 'RESEND_API_KEY not configured'}
+    from_addr = from_address or os.getenv('SMTP_FROM', 'iosif@skopi.io')
+    base_url = os.getenv('ORB_BASE_URL', 'https://nevsky.skopi.io')
+    if draft_id:
+        pixel_url = f'{base_url}/track/email-open/{draft_id}'
+        html_body = f'<html><body><pre>{body}</pre><img src="{pixel_url}" width="1" height="1" style="display:none" /></body></html>'
+    else:
+        html_body = f'<html><body><pre>{body}</pre></body></html>'
+    payload = {
+        'from': from_addr,
+        'to': [to_address],
+        'subject': subject,
+        'text': body,
+        'html': html_body,
+    }
     try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = smtp_from
-        msg["To"] = to_address
-        msg.attach(MIMEText(body, "plain"))
-        if draft_id:
-            base_url = os.getenv("ORB_BASE_URL", "https://nevsky.skopi.io")
-            pixel_url = f"{base_url}/track/email-open/{draft_id}"
-            html_body = f'<html><body><pre>{body}</pre><img src="{pixel_url}" width="1" height="1" style="display:none" /></body></html>'
-            msg.attach(MIMEText(html_body, "html"))
-
-        with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:
-            server.login(smtp_user, smtp_password)
-            server.sendmail(smtp_from, [to_address], msg.as_string())
-
-        return {"ok": True, "to": to_address, "subject": subject}
+        resp = httpx.post(
+            'https://api.resend.com/emails',
+            headers={
+                'Authorization': f'Bearer {resend_api_key}',
+                'Content-Type': 'application/json',
+            },
+            json=payload,
+            timeout=15,
+        )
+        if resp.status_code in (200, 201):
+            return {'ok': True, 'to': to_address, 'subject': subject, 'resend_id': resp.json().get('id')}
+        else:
+            return {'ok': False, 'error': f'Resend API error {resp.status_code}: {resp.text}'}
     except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
+        return {'ok': False, 'error': str(e)}
 def build_email_summary_and_draft_ai_first(
     subject: str,
     body: str,
@@ -350,27 +401,62 @@ def build_email_summary_and_draft_ai_first(
         }
     try:
         client = Anthropic(api_key=api_key)
-        prompt = "Subject: " + subject + "\n\nBody:\n" + body[:3000]
+        prompt = "Subject: " + subject + "\n\nBody:\n" + body[:6000]
+
+        # Use strong model for email drafting — quality matters here
+        email_model = os.getenv("NEVSKY_SUMMARY_MODEL_STRONG", "claude-sonnet-4-6")
+
+        system_prompt = """You are Nevsky ORB, an intelligent executive assistant for SKOpi Global Holdings.
+Your job is to read incoming emails and produce two things with high quality.
+
+Return exactly these two labeled sections:
+
+SUMMARY: A clear 1-2 sentence summary of what this email is about and what action (if any) is needed.
+
+DRAFT: A professional, natural draft reply that:
+- Matches the tone of the original email (formal if formal, direct if direct)
+- Addresses the specific points raised
+- Is 3-6 sentences unless the email warrants more
+- Sounds like it was written by a thoughtful executive, not a generic AI
+- Does not start with "I hope this email finds you well" or similar filler
+
+Use exactly those labels. Do not add any other sections."""
+
         response = client.messages.create(
-            model=os.getenv("NEVSKY_SUMMARY_MODEL_CHEAP", "claude-haiku-4-5"),
-            max_tokens=300,
+            model=email_model,
+            max_tokens=800,
             temperature=0,
-            system="You are Nevsky ORB, an executive assistant AI. Given an incoming email, return exactly two sections: SUMMARY: A 1-2 sentence summary of what the email is about. DRAFT: A short professional draft reply (2-4 sentences). Use exactly those labels.",
+            system=system_prompt,
             messages=[{"role": "user", "content": prompt}],
         )
         text = response.content[0].text.strip()
         summary = ""
         draft = ""
+        current_section = None
+        draft_lines = []
         for line in text.splitlines():
             if line.startswith("SUMMARY:"):
+                current_section = "summary"
                 summary = line.replace("SUMMARY:", "").strip()
             elif line.startswith("DRAFT:"):
-                draft = line.replace("DRAFT:", "").strip()
+                current_section = "draft"
+                first = line.replace("DRAFT:", "").strip()
+                if first:
+                    draft_lines.append(first)
+            elif current_section == "draft" and line.strip():
+                draft_lines.append(line.strip())
+        if draft_lines:
+            draft = " ".join(draft_lines)
         if not summary:
             summary = f"Email received: {subject}"
         if not draft:
             draft = "Thank you for your email. I will get back to you shortly."
-        return {"summary": summary, "draft_reply": draft, "generation_mode": "anthropic"}
+        return {
+            "summary": summary,
+            "draft_reply": draft,
+            "generation_mode": "anthropic",
+            "model": email_model,
+        }
     except Exception as e:
         print(f"WARN: AI summary failed: {e}")
         return {
@@ -1164,11 +1250,13 @@ def ai_summarize(body: SummarizeRequest):
     client = Anthropic(api_key=api_key)
 
     strength = (body.strength or "cheap").strip().lower()
-    if strength == "strong":
-        model_name = os.getenv("NEVSKY_SUMMARY_MODEL_STRONG", "claude-sonnet-4-20250514")
+    if strength == "opus":
+        model_name = os.getenv("NEVSKY_SUMMARY_MODEL_OPUS", "claude-opus-4-7")
+    elif strength == "strong":
+        model_name = os.getenv("NEVSKY_SUMMARY_MODEL_STRONG", "claude-sonnet-4-6")
     else:
         strength = "cheap"
-        model_name = os.getenv("NEVSKY_SUMMARY_MODEL_CHEAP", "claude-haiku-4-5")
+        model_name = os.getenv("NEVSKY_SUMMARY_MODEL_CHEAP", "claude-haiku-4-5-20251001")
 
     trimmed_text = body.text.strip()[:4000]
     input_chars = len(trimmed_text)
@@ -1177,7 +1265,6 @@ def ai_summarize(body: SummarizeRequest):
         response = client.messages.create(
             model=model_name,
             max_tokens=120,
-            temperature=0,
             system="You are Nevsky ORB. Summarize operational text briefly and clearly in 2-4 bullet points.",
             messages=[
                 {
@@ -1225,7 +1312,20 @@ def ai_summarize(body: SummarizeRequest):
 
     estimated_cost_usd = None
     if input_tokens is not None and output_tokens is not None:
-        estimated_cost_usd = round((input_tokens / 1_000_000) * 0.80 + (output_tokens / 1_000_000) * 4.00, 8)
+        _cost_map = {
+            "claude-haiku-4-5":              (1.00,  5.00),
+            "claude-haiku-4-5-20251001":     (1.00,  5.00),
+            "claude-sonnet-4-6":             (3.00, 15.00),
+            "claude-sonnet-4-20250514":      (3.00, 15.00),
+            "claude-opus-4-6":               (5.00, 25.00),
+            "claude-opus-4-7":               (5.00, 25.00),
+        }
+        _in_rate, _out_rate = _cost_map.get(model_name, (3.00, 15.00))
+        estimated_cost_usd = round(
+            (input_tokens / 1_000_000) * _in_rate +
+            (output_tokens / 1_000_000) * _out_rate,
+            8
+        )
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
