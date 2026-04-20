@@ -144,6 +144,27 @@ def mark_email_processed(message_id: str, sender_email: str, subject: str):
     except Exception as e:
         print(f"ERROR: mark_email_processed failed: {e}")
 
+
+def get_active_owners():
+    try:
+        conn = get_db_connection()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT email FROM users
+                    WHERE role IN ('founder', 'cso', 'admin', 'owner')
+                    AND email IS NOT NULL
+                    ORDER BY created_at ASC
+                """)
+                rows = cur.fetchall()
+                owners = [r[0] for r in rows if r[0]]
+                if not owners:
+                    owners = ["iosif@skopi.io"]
+                return owners
+    except Exception as e:
+        print(f"ERROR: get_active_owners failed: {e}")
+        return ["iosif@skopi.io"]
+
 def poll_imap():
     host = os.getenv("IMAP_HOST", "")
     port = int(os.getenv("IMAP_PORT", 993))
@@ -155,6 +176,8 @@ def poll_imap():
         return
 
     try:
+        owners = get_active_owners()
+        print(f"INFO: Routing emails to owners: {owners}")
         mail = imaplib.IMAP4_SSL(host, port)
         mail.login(user, password)
         mail.select("INBOX")
@@ -183,27 +206,27 @@ def poll_imap():
 
                 print(f"INFO: Processing email '{subject}' from {sender}")
 
-                payload = {
-                    "owner_email": "iosif@skopi.io",
-                    "sender_email": sender,
-                    "subject": subject,
-                    "body": body,
-                    "thread_id": thread_id or None,
-                }
-
-                resp = httpx.post(
-                    "http://api:8080/ingest/email/test",
-                    json=payload,
-                    timeout=30,
-                )
-                result = resp.json()
-
-                if result.get("ok") or result.get("filtered"):
-                    mark_email_processed(thread_id, sender, subject)
-                    mail.store(msg_id, "+FLAGS", "\\Seen")
-                    print(f"INFO: Email processed and marked read thread {thread_id}")
-                else:
-                    print(f"WARN: Ingest returned not-ok: {result}")
+                for owner_email in owners:
+                    payload = {
+                        "owner_email": owner_email,
+                        "sender_email": sender,
+                        "subject": subject,
+                        "body": body,
+                        "thread_id": thread_id or None,
+                    }
+                    resp = httpx.post(
+                        "http://api:8080/ingest/email/test",
+                        json=payload,
+                        timeout=30,
+                    )
+                    result = resp.json()
+                    if result.get("ok") or result.get("filtered"):
+                        print(f"INFO: Email routed to {owner_email} thread {thread_id}")
+                    else:
+                        print(f"WARN: Ingest for {owner_email} not-ok: {result}")
+                mark_email_processed(thread_id, sender, subject)
+                mail.store(msg_id, "+FLAGS", "\\Seen")
+                print(f"INFO: Email marked read thread {thread_id}")
 
             except Exception as e:
                 print(f"ERROR: Failed to process email {msg_id}: {e}")
