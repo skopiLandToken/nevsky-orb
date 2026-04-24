@@ -1,1 +1,5 @@
-python-multipart>=0.0.9
+# NOT USED BY DOCKER BUILD — this is an orphan file.
+# The authoritative requirements file is at: /opt/nevsky-dev/app/requirements.txt
+# The Dockerfile at /opt/nevsky-dev/app/Dockerfile copies FROM app/requirements.txt.
+# This file exists only to prevent future edits from landing in the wrong place.
+# If you're adding a dependency, edit app/requirements.txt, not this one.
