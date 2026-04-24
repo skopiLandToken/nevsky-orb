@@ -1,16 +1,24 @@
-from fastapi import Header, FastAPI, Request, HTTPException
+from fastapi import Header, FastAPI, Request, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import os
+from uuid import uuid4
+import hashlib
+import base64
 import json
 from datetime import datetime, timezone, timedelta
 import re
 import psycopg
 import httpx
 from anthropic import Anthropic
+from biography import handle_biography_message, handle_biography_callback, router as biography_router
+from children.ophelia_child import is_dan, ask_ophelia, get_intro
+from children.sophia_child import is_iosif, ask_sophia, get_intro as get_sophia_intro
+from children.hypatia_child import is_fred, ask_hypatia, get_intro as get_hypatia_intro
 
 app = FastAPI(title="Nevsky API", version="0.1.0")
+app.include_router(biography_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -72,6 +80,122 @@ async def send_telegram_message(chat_id: int, text: str, reply_markup: dict | No
         except Exception:
             data = {"ok": False, "status_code": resp.status_code, "text": resp.text}
         return data
+
+async def send_sophia_message(chat_id: int, text: str):
+    """Send via Sophia's dedicated bot token."""
+    bot_token = os.environ.get("SOPHIA_BOT_TOKEN", "")
+    if not bot_token:
+        return await send_telegram_message(chat_id, text)
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    async with httpx.AsyncClient() as c:
+        try:
+            await c.post(url, json=payload, timeout=10)
+        except Exception as e:
+            logger.warning("send_sophia_message error: %s", e)
+
+
+async def send_ophelia_message(chat_id: int, text: str):
+    """Send via Ophelia's dedicated bot token."""
+    bot_token = os.environ.get("OPHELIA_BOT_TOKEN", "")
+    if not bot_token:
+        return await send_telegram_message(chat_id, text)
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    async with httpx.AsyncClient() as c:
+        try:
+            await c.post(url, json=payload, timeout=10)
+        except Exception as e:
+            logger.warning("send_ophelia_message error: %s", e)
+
+
+async def send_ophelia_message_with_markup(chat_id: int, text: str, reply_markup: dict):
+    """Send via Ophelia bot with inline keyboard markup."""
+    bot_token = os.environ.get("OPHELIA_BOT_TOKEN", "")
+    if not bot_token:
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+        "reply_markup": reply_markup
+    }
+    async with httpx.AsyncClient() as c:
+        try:
+            resp = await c.post(url, json=payload, timeout=10)
+            return resp.json()
+        except Exception as e:
+            logger.warning("send_ophelia_message_with_markup error: %s", e)
+            return {}
+
+
+async def send_hypatia_message(chat_id: int, text: str):
+    """Send via Hypatia's dedicated bot token."""
+    bot_token = os.environ.get("HYPATIA_BOT_TOKEN", "")
+    if not bot_token:
+        return await send_telegram_message(chat_id, text)
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    async with httpx.AsyncClient() as c:
+        try:
+            await c.post(url, json=payload, timeout=10)
+        except Exception as e:
+            logger.warning("send_hypatia_message error: %s", e)
+
+
+async def send_sophia_message_with_markup(chat_id: int, text: str, reply_markup: dict):
+    """Send via Sophia bot with inline keyboard markup."""
+    bot_token = os.environ.get("SOPHIA_BOT_TOKEN", "")
+    if not bot_token:
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+        "reply_markup": reply_markup
+    }
+    async with httpx.AsyncClient() as c:
+        try:
+            resp = await c.post(url, json=payload, timeout=10)
+            return resp.json()
+        except Exception as e:
+            logger.warning("send_sophia_message_with_markup error: %s", e)
+            return {}
+
+
+async def edit_telegram_message(chat_id: int, message_id: int, text: str, reply_markup: dict | None = None):
+    """Edit an existing Telegram message in place."""
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    url = f"https://api.telegram.org/bot{bot_token}/editMessageText"
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "Markdown",
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    else:
+        payload["reply_markup"] = {"inline_keyboard": []}
+    async with httpx.AsyncClient() as client_http:
+        try:
+            await client_http.post(url, json=payload, timeout=10)
+        except Exception as e:
+            logger.warning("edit_telegram_message error: %s", e)
+
+
+async def delete_telegram_message(chat_id: int, message_id: int):
+    """Delete a Telegram message entirely."""
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    url = f"https://api.telegram.org/bot{bot_token}/deleteMessage"
+    async with httpx.AsyncClient() as client_http:
+        try:
+            await client_http.post(url, json={"chat_id": chat_id, "message_id": message_id}, timeout=10)
+        except Exception as e:
+            logger.warning("delete_telegram_message error: %s", e)
+
 
 async def answer_telegram_callback_query(callback_query_id: str, text: str | None = None):
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -152,9 +276,46 @@ def build_email_approval_reply_markup(approval_id):
     return {
         "inline_keyboard": [
             [
-                {"text": "Send", "callback_data": f"email_send:{aid}"},
-                {"text": "Edit", "callback_data": f"email_edit:{aid}"},
-                {"text": "Cancel", "callback_data": f"email_cancel:{aid}"},
+                {"text": "✉️ Send", "callback_data": f"email_send:{aid}"},
+                {"text": "✏️ Edit", "callback_data": f"email_edit:{aid}"},
+            ],
+            [
+                {"text": "🚫 No Response Needed", "callback_data": f"email_no_reply:{aid}"},
+                {"text": "❌ Cancel", "callback_data": f"email_cancel:{aid}"},
+            ],
+            [
+                {"text": "⏰ Snooze 1hr", "callback_data": f"email_snooze_1:{aid}"},
+                {"text": "⏰ Snooze 12hr", "callback_data": f"email_snooze_12:{aid}"},
+                {"text": "⏰ Snooze 1day", "callback_data": f"email_snooze_24:{aid}"},
+            ],
+        ]
+    }
+
+
+def build_email_snoozed_reply_markup(approval_id):
+    aid = str(approval_id)
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✉️ Send", "callback_data": f"email_send:{aid}"},
+                {"text": "✏️ Edit", "callback_data": f"email_edit:{aid}"},
+            ],
+            [
+                {"text": "🚫 No Response Needed", "callback_data": f"email_no_reply:{aid}"},
+                {"text": "❌ Cancel", "callback_data": f"email_cancel:{aid}"},
+            ],
+        ]
+    }
+
+
+def build_card_lifecycle_markup(object_type: str, object_id: str):
+    """Universal Mark Complete / Clear buttons for any ORB card."""
+    oid = str(object_id)
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Mark Complete", "callback_data": f"card_complete:{object_type}:{oid}"},
+                {"text": "🗑 Clear", "callback_data": f"card_clear:{object_type}:{oid}"},
             ]
         ]
     }
@@ -1397,6 +1558,38 @@ async def telegram_webhook(request: Request):
     chat_id = chat.get("id")
     text = (message.get("text") or "").strip()
 
+    # ── OPHELIA — Dan Wikert's personal agreement child ──────────────
+    from_user = message.get("from", {}) or {}
+    sender_telegram_id = str(from_user.get("id", ""))
+    if chat_id and is_dan(sender_telegram_id):
+        if text.lower() in ["/start", "hi", "hello", "hi ophelia", "hello ophelia", ""]:
+            await send_ophelia_message(chat_id, get_intro())
+        else:
+            ophelia_reply = await ask_ophelia(user_message=text)
+            await send_ophelia_message(chat_id, ophelia_reply)
+        return {"ok": True}
+    # ── END OPHELIA ───────────────────────────────────────────────────
+
+    # ── SOPHIA — Iosif's personal ORB child ──────────────────────────
+    if chat_id and is_iosif(sender_telegram_id):
+        if text.lower() in ["/start", "hi", "hello", "hi sophia", "hello sophia", ""]:
+            await send_sophia_message(chat_id, get_sophia_intro())
+        else:
+            sophia_reply = await ask_sophia(user_message=text)
+            await send_sophia_message(chat_id, sophia_reply)
+        return {"ok": True}
+    # ── END SOPHIA ────────────────────────────────────────────────────
+
+    # ── HYPATIA — Fred Jewell's personal ORB child ───────────────────
+    if chat_id and is_fred(sender_telegram_id):
+        if text.lower() in ["/start", "hi", "hello", "hi hypatia", "hello hypatia", ""]:
+            await send_hypatia_message(chat_id, get_hypatia_intro())
+        else:
+            hypatia_reply = await ask_hypatia(user_message=text)
+            await send_hypatia_message(chat_id, hypatia_reply)
+        return {"ok": True}
+    # ── END HYPATIA ───────────────────────────────────────────────────
+
     result = await process_telegram_payload(payload)
 
     if chat_id:
@@ -2116,7 +2309,7 @@ async def ingest_telegram_update(request: Request):
     payload = await request.json()
     return await process_telegram_payload(payload)
 
-async def process_telegram_callback_query(callback_query: dict):
+async def process_telegram_callback_query(callback_query: dict, response_bot_token: str | None = None):
     callback_query_id = callback_query.get("id")
     data = (callback_query.get("data") or "").strip()
     message = callback_query.get("message", {}) or {}
@@ -2375,6 +2568,221 @@ async def process_telegram_callback_query(callback_query: dict):
                     )
                 else:
                     result_text = "Approval not found."
+
+            elif action == "change_yes":
+                change_id = reminder_id
+                action_type = "change.confirmed_by_dan"
+                result_text = f"✅ Change confirmed: {change_id}"
+                write_audit_log(cur, user_id=user_id, action_type=action_type,
+                                object_type="change", object_id=change_id,
+                                human_decision="dan_confirmed_yes")
+                msg_id = message.get("message_id")
+                orig_text = message.get("text", "Change")
+                confirmed_time = datetime.now(timezone.utc).strftime("%b %d %H:%M")
+
+                # Grey out the card in Dan's Telegram
+                if chat_id and msg_id:
+                    await edit_telegram_message(
+                        chat_id, msg_id,
+                        f"{orig_text}\n\n_✅ Confirmed by Dan — {confirmed_time} UTC_",
+                        reply_markup={"inline_keyboard": []}
+                    )
+
+                # Auto-create Deck card on board 2
+                # Map change_id to card details
+                deck_cards = {
+                    "airdrop_date": ("🎯 Main Airdrop Campaign Launch — May 5", "CONFIRMED BY DAN. Full airdrop goes live May 5 2026. All systems must be ready: affiliate attribution, social channels, placement partners paid, creative assets deployed.", "🔴 To Do", "2026-05-05"),
+                    "twitter_airdrop": ("🐦 X/Twitter Airdrop — May 4", "CONFIRMED BY DAN. X/Twitter airdrop launches May 4 — one day before main campaign. Warmup push. Part of $3,000 airdrop placement budget.", "🔴 To Do", "2026-05-04"),
+                    "office_search": ("🏢 Redmond Office Search — Move In by May 1", "CONFIRMED BY DAN. Find apartment or rental in Redmond for SKOpi local presence. Iosif leading. Viewings Tuesday April 28. Goal: moved in by May 1.", "🔵 In Progress", "2026-05-01"),
+                    "drone_shoot": ("🚁 Drone Shoot — Timothy Park — April 28 3-4 PM", "CONFIRMED BY DAN. Timothy Park (503-407-5853). Tuesday April 28 3-4 PM. 400ft airspace clearance being filed. Estimate tomorrow before noon. Deposit required. Budget $1,000.", "🔴 To Do", "2026-04-28"),
+                    "bonneville_email": ("⚡ Bonneville Power Approval — Plat Draft", "CONFIRMED BY DAN. Send rough draft plat to Bonneville Power today. Critical land advancement. Dan is point person on follow-up.", "🔵 In Progress", "2026-04-22"),
+                    "surveyor_deposit": ("📐 Surveyor Deposit — DAN RESPONSIBLE — May 12", "CONFIRMED BY DAN. Dan Wikert solely responsible for identifying surveyor, securing scheduling, paying $2,500 deposit by May 12 — one week after launch.", "🔴 To Do", "2026-05-12"),
+                    "bella_contract": ("👩‍💼 Bella Contractor — May 2", "CONFIRMED BY DAN. Bella contractor integration May 2 — 3 days before airdrop. No action before then.", "🔴 To Do", "2026-05-02"),
+                    "bluevine_transfer": ("💸 Dan BlueVine Transfers — $32,000 Remaining", "CONFIRMED BY DAN. $5,000 received April 22. $32,000 still owed. $5,000 per transfer limit. Weekly reminder to Dan on next transfer.", "✅ Complete", "2026-04-22"),
+                }
+
+                if change_id in deck_cards:
+                    title, desc, stack_name, due = deck_cards[change_id]
+                    try:
+                        import urllib.request as ureq
+                        import base64 as b64
+                        deck_base = "https://office.skopi.io/index.php/apps/deck/api/v1.0"
+                        deck_creds = b64.b64encode(b"admin:ORBadmin2024!").decode()
+                        deck_headers = {
+                            "Authorization": f"Basic {deck_creds}",
+                            "Content-Type": "application/json",
+                            "OCS-APIREQUEST": "true"
+                        }
+                        # Get stacks
+                        sreq = ureq.Request(f"{deck_base}/boards/2/stacks", headers=deck_headers)
+                        with ureq.urlopen(sreq) as r:
+                            stacks_data = json.loads(r.read())
+                        stack_id = None
+                        for s in stacks_data:
+                            if stack_name in s['title']:
+                                stack_id = s['id']
+                                break
+                        if stack_id:
+                            card_data = json.dumps({
+                                "title": title, "description": desc,
+                                "type": "plain", "order": 999,
+                                "duedate": f"{due}T00:00:00+00:00"
+                            }).encode()
+                            creq = ureq.Request(
+                                f"{deck_base}/boards/2/stacks/{stack_id}/cards",
+                                data=card_data, headers=deck_headers, method="POST"
+                            )
+                            with ureq.urlopen(creq) as r:
+                                card_result = json.loads(r.read())
+                            if "id" in card_result:
+                                logger.info("Deck card created for change %s: %s", change_id, title)
+                    except Exception as deck_err:
+                        logger.error("Deck card creation failed for %s: %s", change_id, deck_err)
+
+                # Notify Iosif via Sophia
+                with get_db_connection() as conn2:
+                    with conn2.cursor() as cur2:
+                        cur2.execute("SELECT telegram_user_id FROM users WHERE email = %s LIMIT 1",
+                                     ("iosif@skopi.io",))
+                        row2 = cur2.fetchone()
+                        if row2 and row2[0]:
+                            await send_sophia_message(int(row2[0]),
+                                f"*Sophia* — Dan confirmed: _{orig_text[:100]}_\n_Deck board updated automatically._")
+
+            elif action == "change_no":
+                # Dan flagged a concern — notify Iosif immediately
+                change_id = reminder_id
+                action_type = "change.flagged_by_dan"
+                result_text = f"⚠️ Concern flagged: {change_id}"
+                write_audit_log(cur, user_id=user_id, action_type=action_type,
+                                object_type="change", object_id=change_id,
+                                human_decision="dan_flagged_concern")
+                msg_id = message.get("message_id")
+                orig_text = message.get("text", "Change")
+                if chat_id and msg_id:
+                    await edit_telegram_message(
+                        chat_id, msg_id,
+                        f"{orig_text}\n\n_⚠️ Concern flagged — Iosif has been notified_",
+                        reply_markup={"inline_keyboard": []}
+                    )
+                # Notify Iosif urgently via Sophia
+                with get_db_connection() as conn2:
+                    with conn2.cursor() as cur2:
+                        cur2.execute("SELECT telegram_user_id FROM users WHERE email = %s LIMIT 1",
+                                     ("iosif@skopi.io",))
+                        row2 = cur2.fetchone()
+                        if row2 and row2[0]:
+                            await send_sophia_message(int(row2[0]),
+                                f"*Sophia* ⚠️ — Dan flagged a concern on:\n\n_{orig_text[:80]}_\n\nPlease follow up with Dan directly.")
+
+            elif action == "email_no_reply":
+                cur.execute(
+                    """
+                    UPDATE approvals
+                    SET status = 'no_reply',
+                        updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING id, target_object_id
+                    """,
+                    (reminder_id,),
+                )
+                row = cur.fetchone()
+                action_type = "email.no_reply_from_button"
+                if row:
+                    approval_id = row[0]
+                    email_draft_id = row[1]
+                    if email_draft_id:
+                        cur.execute(
+                            "UPDATE email_drafts SET status = 'no_reply', updated_at = NOW() WHERE id = %s",
+                            (email_draft_id,),
+                        )
+                    result_text = "✅ Marked as no response needed."
+                    write_audit_log(cur, user_id=user_id, action_type=action_type,
+                                    object_type="approval", object_id=approval_id,
+                                    human_decision="telegram_inline_button_no_reply")
+                    # Grey out the card
+                    msg_id = message.get("message_id")
+                    if chat_id and msg_id:
+                        orig_text = message.get("text", "Email card")
+                        await edit_telegram_message(
+                            chat_id, msg_id,
+                            f"~~{orig_text}~~\n\n_No response needed - marked {datetime.now(timezone.utc).strftime('%b %d %H:%M')} UTC_",
+                            reply_markup={"inline_keyboard": [[
+                                {"text": "🗑 Clear", "callback_data": f"card_clear:approval:{approval_id}"}
+                            ]]}
+                        )
+                else:
+                    result_text = "Approval not found."
+
+            elif action in ("email_snooze_1", "email_snooze_12", "email_snooze_24"):
+                hours = {"email_snooze_1": 1, "email_snooze_12": 12, "email_snooze_24": 24}[action]
+                cur.execute(
+                    """
+                    UPDATE approvals
+                    SET status = 'snoozed',
+                        snooze_until = NOW() + (%s || ' hours')::interval,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING id, target_object_id, snooze_until
+                    """,
+                    (str(hours), reminder_id),
+                )
+                row = cur.fetchone()
+                action_type = "email.snoozed_from_button"
+                if row:
+                    approval_id = row[0]
+                    snooze_until = row[2]
+                    snooze_str = snooze_until.strftime("%b %d %H:%M UTC") if snooze_until else f"{hours}hr"
+                    result_text = f"⏰ Snoozed until {snooze_str}"
+                    write_audit_log(cur, user_id=user_id, action_type=action_type,
+                                    object_type="approval", object_id=approval_id,
+                                    human_decision=f"telegram_inline_button_snooze_{hours}h")
+                    # Grey out the card
+                    msg_id = message.get("message_id")
+                    if chat_id and msg_id:
+                        orig_text = message.get("text", "Email card")
+                        await edit_telegram_message(
+                            chat_id, msg_id,
+                            f"{orig_text}\n\n_Back for review {snooze_str}_",
+                            reply_markup={"inline_keyboard": []}
+                        )
+                else:
+                    result_text = "Approval not found."
+
+            elif action == "card_complete":
+                # Universal mark complete — works for any card type
+                parts = reminder_id.split(":") if reminder_id else []
+                obj_type = parts[0] if len(parts) > 0 else "unknown"
+                obj_id = parts[1] if len(parts) > 1 else reminder_id
+                action_type = f"{obj_type}.completed_from_card"
+                result_text = f"✅ Marked complete."
+                write_audit_log(cur, user_id=user_id, action_type=action_type,
+                                object_type=obj_type, object_id=obj_id,
+                                human_decision="telegram_card_complete")
+                msg_id = message.get("message_id")
+                if chat_id and msg_id:
+                    orig_text = message.get("text", "Card")
+                    await edit_telegram_message(
+                        chat_id, msg_id,
+                        f"{orig_text}\n\n_Completed {datetime.now(timezone.utc).strftime('%b %d %H:%M')} UTC_",
+                        reply_markup={"inline_keyboard": [[
+                            {"text": "🗑 Clear", "callback_data": f"card_clear:{obj_type}:{obj_id}"}
+                        ]]}
+                    )
+
+            elif action == "card_clear":
+                # Delete the card entirely
+                parts = reminder_id.split(":") if reminder_id else []
+                obj_type = parts[0] if len(parts) > 0 else "unknown"
+                obj_id = parts[1] if len(parts) > 1 else reminder_id
+                action_type = f"{obj_type}.card_cleared"
+                result_text = "Card cleared."
+                write_audit_log(cur, user_id=user_id, action_type=action_type,
+                                object_type=obj_type, object_id=obj_id,
+                                human_decision="telegram_card_clear")
+                msg_id = message.get("message_id")
+                if chat_id and msg_id:
+                    await delete_telegram_message(chat_id, msg_id)
 
             elif action == "email_cancel":
                 cur.execute(
@@ -2902,3 +3310,599 @@ async def kb_sync(request: KBSyncRequest, x_webhook_secret: str = Header(None)):
         path=file_path,
         synced_at=synced_at
     )
+
+@app.post("/telegram/sophia/webhook")
+async def sophia_webhook(request: Request):
+    payload = await request.json()
+    callback_query = payload.get("callback_query", {}) or {}
+    if callback_query:
+        return await process_telegram_callback_query(callback_query)
+    message = payload.get("message", {}) or {}
+    chat = message.get("chat", {}) or {}
+    chat_id = chat.get("id")
+    text = (message.get("text") or "").strip()
+    from_user = message.get("from", {}) or {}
+    sender_telegram_id = str(from_user.get("id", ""))
+    if chat_id:
+        if text.lower() in ["/start", "hi", "hello", "hi sophia", "hello sophia", ""]:
+            await send_sophia_message(chat_id, get_sophia_intro())
+        else:
+            sophia_reply = await ask_sophia(user_message=text)
+            await send_sophia_message(chat_id, sophia_reply)
+    return {"ok": True}
+
+
+@app.post("/telegram/ophelia/webhook")
+async def ophelia_webhook(request: Request):
+    payload = await request.json()
+    callback_query = payload.get("callback_query", {}) or {}
+    if callback_query:
+        return await process_telegram_callback_query(callback_query)
+    message = payload.get("message", {}) or {}
+    chat = message.get("chat", {}) or {}
+    chat_id = chat.get("id")
+    text = (message.get("text") or "").strip()
+    from_user = message.get("from", {}) or {}
+    sender_telegram_id = str(from_user.get("id", ""))
+    if chat_id:
+        if text.lower() in ["/start", "hi", "hello", "hi ophelia", "hello ophelia", ""]:
+            await send_ophelia_message(chat_id, get_intro())
+        else:
+            ophelia_reply = await ask_ophelia(user_message=text)
+            await send_ophelia_message(chat_id, ophelia_reply)
+    return {"ok": True}
+
+
+@app.post("/notify/changes")
+async def notify_changes(request: Request):
+    body = await request.json()
+    changes = body.get("changes", [])
+    if not changes:
+        return {"ok": False, "reason": "no changes provided"}
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT telegram_user_id FROM users WHERE email = %s LIMIT 1",
+                       ("daniel.wikert@skopi.io",))
+            row = cur.fetchone()
+            dan_chat_id = int(row[0]) if row and row[0] else None
+
+    if not dan_chat_id:
+        return {"ok": False, "reason": "Dan telegram_user_id not found"}
+
+    await send_ophelia_message(dan_chat_id,
+        "*Ophelia — SKOpi Update*\n\nHi Dan, Iosif has made some updates to the plan. Please review and confirm each one:")
+
+    sent = 0
+    for change in changes:
+        change_id = change.get("id", f"chg_{sent}")
+        title = change.get("title", "Update")
+        description = change.get("description", "")
+        text = f"*{title}*\n\n{description}"
+        markup = {"inline_keyboard": [[
+            {"text": "✅ Confirmed", "callback_data": f"change_yes:{change_id}"},
+            {"text": "❌ Flag Concern", "callback_data": f"change_no:{change_id}"},
+        ]]}
+        await send_ophelia_message_with_markup(dan_chat_id, text, markup)
+        sent += 1
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT telegram_user_id FROM users WHERE email = %s LIMIT 1",
+                       ("iosif@skopi.io",))
+            row = cur.fetchone()
+            if row and row[0]:
+                await send_sophia_message(int(row[0]),
+                    f"*Sophia* — {sent} change notification(s) sent to Dan for review.")
+
+    return {"ok": True, "sent": sent}
+
+@app.post("/telegram/hypatia/webhook")
+async def hypatia_webhook(request: Request):
+    payload = await request.json()
+    callback_query = payload.get("callback_query", {}) or {}
+    if callback_query:
+        hypatia_token = os.environ.get("HYPATIA_BOT_TOKEN", "")
+        return await process_telegram_callback_query(callback_query, response_bot_token=hypatia_token)
+    message = payload.get("message", {}) or {}
+    chat = message.get("chat", {}) or {}
+    chat_id = chat.get("id")
+    text = (message.get("text") or "").strip()
+    from_user = message.get("from", {}) or {}
+    sender_id = str(from_user.get("id", ""))
+
+    # Auto-capture Fred's Telegram ID if we don't have it yet
+    if chat_id and sender_id:
+        import subprocess
+        subprocess.run(
+            ["python3", "-c",
+             f"open('/opt/nevsky-dev/kb/fred_telegram_id.txt','w').write('{sender_id}')"],
+            capture_output=True
+        )
+
+    if chat_id:
+        from children.hypatia_child import maybe_send_welcome
+        await maybe_send_welcome(chat_id)
+        if text.lower() in ["/start", "hi", "hello", "hi hypatia", "hello hypatia", ""]:
+            pass  # Welcome message already sent by maybe_send_welcome
+        else:
+            hypatia_reply = await ask_hypatia(user_message=text)
+            await send_hypatia_message(chat_id, hypatia_reply)
+    return {"ok": True}
+
+
+# === SITE_PLANS_ROUTES_START ===
+# Added via patch_site_plans.py — Nevsky site plan ingestion
+# Routes:
+#   POST /site-plans/analyze        — upload PDF, Claude Opus extracts structured data
+#   GET  /site-plans                — list all analyzed plans
+#   GET  /site-plans/{plan_id}      — get single plan + lots + scenarios
+
+SITE_PLANS_MODEL = os.getenv("NEVSKY_SITE_PLAN_MODEL", "claude-opus-4-5")
+SITE_PLANS_MAX_PDF_BYTES = 25 * 1024 * 1024
+SITE_PLANS_DEFAULT_4PLEX_PRICE = 500_000.00
+
+SITE_PLANS_EXTRACTION_PROMPT = """You are analyzing a real-estate site plan / plat document for SKOpi Global Holdings' ORB (Nevsky). Extract structured data.
+
+Return ONLY a single JSON object — no prose, no markdown fences, no commentary.
+The schema you must match exactly:
+
+{
+  "project_name": string | null,
+  "city": string | null,
+  "state": string | null,
+  "county": string | null,
+  "apn": string | null,
+  "street_address": string | null,
+  "total_sqft": number | null,
+  "total_acres": number | null,
+  "zoning": string | null,
+  "unit_count": number | null,
+  "lot_count": number | null,
+  "estimated_total_value": number | null,
+  "estimated_per_lot_value": number | null,
+  "has_utility_easement": boolean,
+  "easement_description": string | null,
+  "setback_notes": string | null,
+  "executive_summary": string,
+  "lots": [
+    {
+      "lot_label": string,
+      "side": "west"|"east"|"north"|"south"|"center"|"other"|null,
+      "width_ft": number | null,
+      "depth_ft": number | null,
+      "lot_sqft": number | null,
+      "structure_footprint_sqft": number | null,
+      "structure_type": string | null,
+      "within_easement_buffer": boolean,
+      "notes": string | null
+    }
+  ],
+  "scenarios": [
+    {
+      "scenario_label": string,
+      "description": string,
+      "total_sqft": number | null,
+      "lot_count": number | null,
+      "unit_count": number | null,
+      "gross_retail_value_usd": number | null,
+      "per_unit_value_usd": number | null,
+      "notes": string | null
+    }
+  ],
+  "data_quality_notes": string | null
+}
+
+Rules:
+- If a number is not shown, use null — do NOT guess.
+- Convert feet-inches to decimal feet.
+- If the plan shows ~5000 sqft structure pads in residential context, default structure_type to "4plex".
+- If the plan's own math is inconsistent, note it in data_quality_notes.
+- Return valid JSON only, nothing else.
+"""
+
+
+# Opus 4.x pricing (USD per 1M tokens) — update if Anthropic changes
+SITE_PLANS_OPUS_IN_PER_MTOK = 15.00
+SITE_PLANS_OPUS_OUT_PER_MTOK = 75.00
+
+
+def _site_plans_calc_cost(tokens_in, tokens_out):
+    return round(
+        (tokens_in / 1_000_000) * SITE_PLANS_OPUS_IN_PER_MTOK
+        + (tokens_out / 1_000_000) * SITE_PLANS_OPUS_OUT_PER_MTOK,
+        6,
+    )
+
+
+def _site_plans_apply_pricing(lots):
+    """Flat $500k per 4plex lot — Redmond rule."""
+    for lot in lots or []:
+        lot["retail_price_usd"] = SITE_PLANS_DEFAULT_4PLEX_PRICE
+        lot["pricing_note"] = "Standard 4plex lot @ $500k (Redmond)"
+        lot["is_price_override"] = False
+    return lots or []
+
+
+def _site_plans_analyze_pdf(pdf_bytes, filename):
+    """Call Claude with the PDF; return parsed JSON dict + usage."""
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not configured")
+    client = Anthropic(api_key=api_key)
+
+    b64 = base64.standard_b64encode(pdf_bytes).decode("utf-8")
+
+    try:
+        resp = client.messages.create(
+            model=SITE_PLANS_MODEL,
+            max_tokens=8000,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": b64,
+                        },
+                    },
+                    {"type": "text", "text": SITE_PLANS_EXTRACTION_PROMPT},
+                ],
+            }],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI analysis failed: {e}")
+
+    text_parts = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
+    raw = "\n".join(text_parts).strip()
+
+    # Strip accidental markdown fences
+    if raw.startswith("```"):
+        raw = raw.split("```", 2)[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.rsplit("```", 1)[0].strip()
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"AI returned invalid JSON: {e}. First 500 chars: {raw[:500]}",
+        )
+
+    parsed["_usage"] = {
+        "input_tokens": resp.usage.input_tokens,
+        "output_tokens": resp.usage.output_tokens,
+    }
+    return parsed
+
+
+@app.post("/site-plans/analyze")
+async def site_plans_analyze(file: UploadFile = File(...)):
+    """Upload a plat/site-plan PDF; Claude extracts lots, scenarios, valuation."""
+    started_at = datetime.now(timezone.utc)
+
+    if not file.content_type or file.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Only application/pdf is supported")
+
+    pdf_bytes = await file.read()
+    if len(pdf_bytes) == 0:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(pdf_bytes) > SITE_PLANS_MAX_PDF_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"PDF exceeds {SITE_PLANS_MAX_PDF_BYTES // (1024*1024)}MB limit",
+        )
+
+    sha = hashlib.sha256(pdf_bytes).hexdigest()
+    input_chars = len(pdf_bytes)
+
+    # Dedup check
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM site_plans WHERE source_sha256 = %s LIMIT 1",
+                (sha,),
+            )
+            row = cur.fetchone()
+            if row:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"PDF already analyzed: plan_id={row[0]}. GET /site-plans/{row[0]}",
+                )
+
+    # Run Claude analysis
+    try:
+        parsed = _site_plans_analyze_pdf(pdf_bytes, file.filename or "upload.pdf")
+    except HTTPException:
+        # Log failure + re-raise
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                uid = get_default_user_id(cur)
+                write_ai_usage_log(
+                    cur,
+                    user_id=uid,
+                    provider="anthropic",
+                    model=SITE_PLANS_MODEL,
+                    action_type="site_plan:analyze",
+                    input_chars=input_chars,
+                    status="error",
+                    error_message="analysis_failed",
+                )
+                conn.commit()
+        raise
+
+    usage = parsed.pop("_usage", {})
+    tokens_in = int(usage.get("input_tokens", 0))
+    tokens_out = int(usage.get("output_tokens", 0))
+    cost_usd = _site_plans_calc_cost(tokens_in, tokens_out)
+
+    lots = _site_plans_apply_pricing(parsed.get("lots") or [])
+    scenarios = parsed.get("scenarios") or []
+    plan_id = str(uuid4())
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            uid = get_default_user_id(cur)
+
+            cur.execute(
+                """
+                INSERT INTO site_plans (
+                    id, tenant_id, uploaded_by, source_filename, source_mime_type,
+                    source_sha256, project_name, city, state, county, apn, street_address,
+                    total_sqft, total_acres, zoning, unit_count, lot_count,
+                    estimated_total_value, estimated_per_lot_value,
+                    has_utility_easement, easement_description, setback_notes,
+                    ai_summary, ai_raw_json, analysis_model, analysis_cost_usd,
+                    analysis_tokens_in, analysis_tokens_out, status
+                ) VALUES (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, 'analyzed'
+                )
+                """,
+                (
+                    plan_id, "skopi", uid, file.filename or "upload.pdf", "application/pdf",
+                    sha, parsed.get("project_name"), parsed.get("city"), parsed.get("state"),
+                    parsed.get("county"), parsed.get("apn"), parsed.get("street_address"),
+                    parsed.get("total_sqft"), parsed.get("total_acres"), parsed.get("zoning"),
+                    parsed.get("unit_count"), parsed.get("lot_count"),
+                    parsed.get("estimated_total_value"), parsed.get("estimated_per_lot_value"),
+                    bool(parsed.get("has_utility_easement", False)),
+                    parsed.get("easement_description"), parsed.get("setback_notes"),
+                    parsed.get("executive_summary"), json.dumps(parsed),
+                    SITE_PLANS_MODEL, cost_usd, tokens_in, tokens_out,
+                ),
+            )
+
+            for lot in lots:
+                cur.execute(
+                    """
+                    INSERT INTO site_plan_lots (
+                        site_plan_id, lot_label, side, width_ft, depth_ft, lot_sqft,
+                        structure_footprint_sqft, structure_type,
+                        retail_price_usd, pricing_note, is_price_override,
+                        within_easement_buffer
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        plan_id, lot.get("lot_label"), lot.get("side"),
+                        lot.get("width_ft"), lot.get("depth_ft"), lot.get("lot_sqft"),
+                        lot.get("structure_footprint_sqft"), lot.get("structure_type"),
+                        lot.get("retail_price_usd"), lot.get("pricing_note"),
+                        bool(lot.get("is_price_override", False)),
+                        bool(lot.get("within_easement_buffer", False)),
+                    ),
+                )
+
+            for sc in scenarios:
+                cur.execute(
+                    """
+                    INSERT INTO site_plan_scenarios (
+                        site_plan_id, scenario_label, description,
+                        total_sqft, lot_count, unit_count,
+                        gross_retail_value_usd, per_unit_value_usd, notes, ai_raw_json
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        plan_id, sc.get("scenario_label") or "unlabeled",
+                        sc.get("description"),
+                        sc.get("total_sqft"), sc.get("lot_count"), sc.get("unit_count"),
+                        sc.get("gross_retail_value_usd"), sc.get("per_unit_value_usd"),
+                        sc.get("notes"), json.dumps(sc),
+                    ),
+                )
+
+            write_ai_usage_log(
+                cur,
+                user_id=uid,
+                provider="anthropic",
+                model=SITE_PLANS_MODEL,
+                action_type="site_plan:analyze",
+                input_chars=input_chars,
+                input_tokens=tokens_in,
+                output_tokens=tokens_out,
+                estimated_cost_usd=cost_usd,
+                object_type="site_plan",
+                object_id=plan_id,
+                status="success",
+            )
+            conn.commit()
+
+    elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
+
+    return {
+        "plan_id": plan_id,
+        "project_name": parsed.get("project_name"),
+        "city": parsed.get("city"),
+        "state": parsed.get("state"),
+        "total_sqft": parsed.get("total_sqft"),
+        "lot_count": parsed.get("lot_count"),
+        "unit_count": parsed.get("unit_count"),
+        "estimated_total_value": parsed.get("estimated_total_value"),
+        "executive_summary": parsed.get("executive_summary"),
+        "data_quality_notes": parsed.get("data_quality_notes"),
+        "lots_stored": len(lots),
+        "scenarios_stored": len(scenarios),
+        "analysis": {
+            "duration_seconds": elapsed,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "cost_usd": cost_usd,
+            "model": SITE_PLANS_MODEL,
+        },
+    }
+
+
+@app.get("/site-plans")
+async def site_plans_list(limit: int = 50, offset: int = 0):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, source_filename, project_name, city, state,
+                       total_acres, lot_count, unit_count,
+                       estimated_total_value, analysis_cost_usd,
+                       status, created_at
+                FROM site_plans
+                WHERE status != 'archived'
+                ORDER BY created_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                (limit, offset),
+            )
+            rows = cur.fetchall()
+
+    return [
+        {
+            "id": str(r[0]),
+            "source_filename": r[1],
+            "project_name": r[2],
+            "city": r[3],
+            "state": r[4],
+            "total_acres": float(r[5]) if r[5] is not None else None,
+            "lot_count": r[6],
+            "unit_count": r[7],
+            "estimated_total_value": float(r[8]) if r[8] is not None else None,
+            "analysis_cost_usd": float(r[9]) if r[9] is not None else None,
+            "status": r[10],
+            "created_at": r[11].isoformat() if r[11] else None,
+        }
+        for r in rows
+    ]
+
+
+@app.get("/site-plans/{plan_id}")
+async def site_plans_get(plan_id: str):
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, source_filename, project_name, city, state, county,
+                       street_address, total_sqft, total_acres, zoning,
+                       unit_count, lot_count, estimated_total_value,
+                       estimated_per_lot_value, has_utility_easement,
+                       easement_description, setback_notes, ai_summary,
+                       ai_raw_json, analysis_model, analysis_cost_usd,
+                       analysis_tokens_in, analysis_tokens_out, status, created_at
+                FROM site_plans WHERE id = %s
+                """,
+                (plan_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Site plan not found")
+
+            cur.execute(
+                """
+                SELECT id, lot_label, side, width_ft, depth_ft, lot_sqft,
+                       structure_footprint_sqft, structure_type,
+                       retail_price_usd, pricing_note, is_price_override,
+                       within_easement_buffer
+                FROM site_plan_lots WHERE site_plan_id = %s
+                ORDER BY side NULLS LAST, lot_label
+                """,
+                (plan_id,),
+            )
+            lots = cur.fetchall()
+
+            cur.execute(
+                """
+                SELECT id, scenario_label, description, total_sqft, lot_count,
+                       unit_count, gross_retail_value_usd, per_unit_value_usd, notes
+                FROM site_plan_scenarios WHERE site_plan_id = %s
+                ORDER BY scenario_label
+                """,
+                (plan_id,),
+            )
+            scenarios = cur.fetchall()
+
+    return {
+        "id": str(row[0]),
+        "source_filename": row[1],
+        "project_name": row[2],
+        "city": row[3],
+        "state": row[4],
+        "county": row[5],
+        "street_address": row[6],
+        "total_sqft": float(row[7]) if row[7] is not None else None,
+        "total_acres": float(row[8]) if row[8] is not None else None,
+        "zoning": row[9],
+        "unit_count": row[10],
+        "lot_count": row[11],
+        "estimated_total_value": float(row[12]) if row[12] is not None else None,
+        "estimated_per_lot_value": float(row[13]) if row[13] is not None else None,
+        "has_utility_easement": row[14],
+        "easement_description": row[15],
+        "setback_notes": row[16],
+        "ai_summary": row[17],
+        "analysis": {
+            "model": row[19],
+            "cost_usd": float(row[20]) if row[20] is not None else None,
+            "tokens_in": row[21],
+            "tokens_out": row[22],
+        },
+        "status": row[23],
+        "created_at": row[24].isoformat() if row[24] else None,
+        "lots": [
+            {
+                "id": str(l[0]),
+                "lot_label": l[1],
+                "side": l[2],
+                "width_ft": float(l[3]) if l[3] is not None else None,
+                "depth_ft": float(l[4]) if l[4] is not None else None,
+                "lot_sqft": float(l[5]) if l[5] is not None else None,
+                "structure_footprint_sqft": float(l[6]) if l[6] is not None else None,
+                "structure_type": l[7],
+                "retail_price_usd": float(l[8]) if l[8] is not None else None,
+                "pricing_note": l[9],
+                "is_price_override": l[10],
+                "within_easement_buffer": l[11],
+            }
+            for l in lots
+        ],
+        "scenarios": [
+            {
+                "id": str(s[0]),
+                "scenario_label": s[1],
+                "description": s[2],
+                "total_sqft": float(s[3]) if s[3] is not None else None,
+                "lot_count": s[4],
+                "unit_count": s[5],
+                "gross_retail_value_usd": float(s[6]) if s[6] is not None else None,
+                "per_unit_value_usd": float(s[7]) if s[7] is not None else None,
+                "notes": s[8],
+            }
+            for s in scenarios
+        ],
+    }
+
+
+# === SITE_PLANS_ROUTES_END ===
