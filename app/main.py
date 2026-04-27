@@ -14,9 +14,32 @@ import httpx
 from anthropic import Anthropic
 from biography import handle_biography_message, handle_biography_callback, router as biography_router
 from blocklist_guard import check_blocklist_and_archive
-from children.ophelia_child import is_dan, ask_ophelia, get_intro
-from children.sophia_child import is_iosif, ask_sophia, get_intro as get_sophia_intro
-from children.hypatia_child import is_fred, ask_hypatia, get_intro as get_hypatia_intro
+# === E2 Step 2b: per-file child imports retired 2026-04-28 ===
+# Children now load from child_personas DB rows via child_engine.ask_child().
+# Sender-ID checks now use bound_telegram_id from child_personas.
+from children.child_engine import ask_child as _engine_ask_child
+from children.child_engine import get_intro as _engine_get_intro
+from children.child_engine import is_owner as _engine_is_owner
+from children.child_engine import load_child as _engine_load_child
+
+
+def is_dan(telegram_id: str) -> bool:
+    """Check if sender is Dan, using ophelia's bound_telegram_id."""
+    child = _engine_load_child("ophelia")
+    return bool(child and str(child.get("bound_telegram_id", "")) == str(telegram_id))
+
+
+def is_iosif(telegram_id: str) -> bool:
+    """Check if sender is Iosif, using sophia's bound_telegram_id."""
+    child = _engine_load_child("sophia")
+    return bool(child and str(child.get("bound_telegram_id", "")) == str(telegram_id))
+
+
+def is_fred(telegram_id: str) -> bool:
+    """Check if sender is Fred, using hypatia's bound_telegram_id."""
+    child = _engine_load_child("hypatia")
+    return bool(child and str(child.get("bound_telegram_id", "")) == str(telegram_id))
+# === END E2 Step 2b imports ===
 
 app = FastAPI(title="Nevsky API", version="0.1.0")
 app.include_router(biography_router)
@@ -1562,33 +1585,41 @@ async def telegram_webhook(request: Request):
     # ── OPHELIA — Dan Wikert's personal agreement child ──────────────
     from_user = message.get("from", {}) or {}
     sender_telegram_id = str(from_user.get("id", ""))
+    # === UNIFIED ENGINE ROUTING (E2 Step 2b, ophelia, 2026-04-28) ===
     if chat_id and is_dan(sender_telegram_id):
-        if text.lower() in ["/start", "hi", "hello", "hi ophelia", "hello ophelia", ""]:
-            await send_ophelia_message(chat_id, get_intro())
-        else:
-            ophelia_reply = await ask_ophelia(user_message=text)
-            await send_ophelia_message(chat_id, ophelia_reply)
+        try:
+            if text.lower() in ["/start", "hi", "hello", "hi ophelia", "hello ophelia", ""]:
+                await send_ophelia_message(chat_id, _engine_get_intro("ophelia"))
+            else:
+                _reply = await _engine_ask_child("ophelia", user_message=text)
+                await send_ophelia_message(chat_id, _reply)
+        except Exception as _engine_err:
+            print(f"[unified_webhook ophelia] engine error: {_engine_err}")
+            await send_ophelia_message(chat_id, "Ophelia hit an internal error. Iosif has been notified.")
         return {"ok": True}
     # ── END OPHELIA ───────────────────────────────────────────────────
 
     # ── SOPHIA — Iosif's personal ORB child ──────────────────────────
+    # === UNIFIED ENGINE ROUTING (E2 Step 2b, sophia, 2026-04-28) ===
     if chat_id and is_iosif(sender_telegram_id):
-        if text.lower() in ["/start", "hi", "hello", "hi sophia", "hello sophia", ""]:
-            await send_sophia_message(chat_id, get_sophia_intro())
-        else:
-            sophia_reply = await ask_sophia(user_message=text)
-            await send_sophia_message(chat_id, sophia_reply)
+        try:
+            if text.lower() in ["/start", "hi", "hello", "hi sophia", "hello sophia", ""]:
+                await send_sophia_message(chat_id, _engine_get_intro("sophia"))
+            else:
+                _reply = await _engine_ask_child("sophia", user_message=text)
+                await send_sophia_message(chat_id, _reply)
+        except Exception as _engine_err:
+            print(f"[unified_webhook sophia] engine error: {_engine_err}")
+            await send_sophia_message(chat_id, "Sophia hit an internal error. Yakov has been logged.")
         return {"ok": True}
     # ── END SOPHIA ────────────────────────────────────────────────────
 
     # ── HYPATIA — Fred Jewell's personal ORB child ───────────────────
+    # === UNIFIED ENGINE ROUTING (E2 Step 2b, hypatia, 2026-04-28) ===
+    # Hypatia decommissioned + honeypot. Silent. Blocklist guard on the
+    # per-bot webhook is the primary defense; this is a backstop.
     if chat_id and is_fred(sender_telegram_id):
-        if text.lower() in ["/start", "hi", "hello", "hi hypatia", "hello hypatia", ""]:
-            await send_hypatia_message(chat_id, get_hypatia_intro())
-        else:
-            hypatia_reply = await ask_hypatia(user_message=text)
-            await send_hypatia_message(chat_id, hypatia_reply)
-        return {"ok": True}
+        return {"ok": True, "honeypot": True}
     # ── END HYPATIA ───────────────────────────────────────────────────
 
     result = await process_telegram_payload(payload)
@@ -3372,13 +3403,20 @@ async def sophia_webhook(request: Request):
     # === END OWNER CHECK (sophia) ===
 
 
+    # === ENGINE ROUTING (E2 Step 2, sophia, 2026-04-28) ===
     if chat_id:
-        if text.lower() in ["/start", "hi", "hello", "hi sophia", "hello sophia", ""]:
-            await send_sophia_message(chat_id, get_sophia_intro())
-        else:
-            sophia_reply = await ask_sophia(user_message=text)
-            await send_sophia_message(chat_id, sophia_reply)
+        try:
+            from children.child_engine import ask_child as _engine_ask, get_intro as _engine_intro
+            if text.lower() in ["/start", "hi", "hello", "hi sophia", "hello sophia", ""]:
+                await send_sophia_message(chat_id, _engine_intro("sophia"))
+            else:
+                _reply = await _engine_ask("sophia", user_message=text)
+                await send_sophia_message(chat_id, _reply)
+        except Exception as _engine_err:
+            print(f"[sophia_webhook] engine error: {_engine_err}")
+            await send_sophia_message(chat_id, "Sophia hit an internal error. Yakov has been logged.")
     return {"ok": True}
+    # === END ENGINE ROUTING (sophia) ===
 
 
 @app.post("/telegram/ophelia/webhook")
@@ -3441,13 +3479,20 @@ async def ophelia_webhook(request: Request):
     # === END OWNER CHECK (ophelia) ===
 
 
+    # === ENGINE ROUTING (E2 Step 2, ophelia, 2026-04-28) ===
     if chat_id:
-        if text.lower() in ["/start", "hi", "hello", "hi ophelia", "hello ophelia", ""]:
-            await send_ophelia_message(chat_id, get_intro())
-        else:
-            ophelia_reply = await ask_ophelia(user_message=text)
-            await send_ophelia_message(chat_id, ophelia_reply)
+        try:
+            from children.child_engine import ask_child as _engine_ask, get_intro as _engine_intro
+            if text.lower() in ["/start", "hi", "hello", "hi ophelia", "hello ophelia", ""]:
+                await send_ophelia_message(chat_id, _engine_intro("ophelia"))
+            else:
+                _reply = await _engine_ask("ophelia", user_message=text)
+                await send_ophelia_message(chat_id, _reply)
+        except Exception as _engine_err:
+            print(f"[ophelia_webhook] engine error: {_engine_err}")
+            await send_ophelia_message(chat_id, "Ophelia hit an internal error. Iosif has been notified.")
     return {"ok": True}
+    # === END ENGINE ROUTING (ophelia) ===
 
 
 @app.post("/notify/changes")
@@ -3529,17 +3574,11 @@ async def hypatia_webhook(request: Request):
         except Exception as _e:
             print(f"[hypatia_webhook] blocklist guard error: {_e}")
         # === END BLOCKLIST GUARD ===
-        from children.hypatia_child import maybe_send_welcome, get_intro
-        # Capture first-contact state BEFORE maybe_send_welcome sets the flag
-        was_first_contact = not os.path.exists("/opt/nevsky-dev/kb/fred_welcome_sent.flag")
-        await maybe_send_welcome(chat_id)
-        if text.lower() in ["/start", "hi", "hello", "hi hypatia", "hello hypatia", ""]:
-            # On repeat /start, send short intro. First contact already covered by welcome.
-            if not was_first_contact:
-                await send_hypatia_message(chat_id, get_intro())
-        else:
-            hypatia_reply = await ask_hypatia(user_message=text)
-            await send_hypatia_message(chat_id, hypatia_reply)
+        # === ENGINE ROUTING (E2 Step 2, hypatia, 2026-04-28) ===
+        # Hypatia is decommissioned + honeypot tier. Blocklist catches Fred.
+        # Anyone else who reaches this point gets silence — no welcome, no intro,
+        # no LLM call. The bot is dead. The shell exists for evidence capture only.
+        # === END ENGINE ROUTING (hypatia) ===
     return {"ok": True}
 
 
