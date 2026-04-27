@@ -13,6 +13,7 @@ import psycopg
 import httpx
 from anthropic import Anthropic
 from biography import handle_biography_message, handle_biography_callback, router as biography_router
+from blocklist_guard import check_blocklist_and_archive
 from children.ophelia_child import is_dan, ask_ophelia, get_intro
 from children.sophia_child import is_iosif, ask_sophia, get_intro as get_sophia_intro
 from children.hypatia_child import is_fred, ask_hypatia, get_intro as get_hypatia_intro
@@ -3323,6 +3324,54 @@ async def sophia_webhook(request: Request):
     text = (message.get("text") or "").strip()
     from_user = message.get("from", {}) or {}
     sender_telegram_id = str(from_user.get("id", ""))
+    # === BLOCKLIST GUARD (sophia, added 2026-04-27, doctrine locked) ===
+    try:
+        _telegram_user_id = (message.get("from") or {}).get("id")
+        if _telegram_user_id:
+            _blocked = await check_blocklist_and_archive(
+                telegram_user_id=_telegram_user_id,
+                chat_id=chat_id or 0,
+                message_text=text or "",
+                bot_name="sophia",
+                message_type="text" if message.get("text") else ("caption" if message.get("caption") else "other"),
+                full_update=payload,
+            )
+            if _blocked:
+                return {"ok": True, "blocked": True}
+    except Exception as _e:
+        print(f"[sophia_webhook] blocklist guard error: {_e}")
+    # === END BLOCKLIST GUARD ===
+    # === OWNER CHECK (sophia, added 2026-04-27) ===
+    # Only the bound Telegram owner gets through to the LLM. Everyone else gets
+    # a polite redirect and is logged to unauthorized_contact_log.
+    try:
+        if sender_telegram_id and sender_telegram_id != "7583693994":
+            # Log the unauthorized contact attempt
+            try:
+                with get_db_connection() as _conn:
+                    with _conn.cursor() as _cur:
+                        _cur.execute(
+                            """INSERT INTO unauthorized_contact_log
+                               (bot_canonical_name, telegram_user_id, telegram_username, chat_id, message_text, full_update_json)
+                               VALUES (%s, %s, %s, %s, %s, %s)""",
+                            ("sophia", int(sender_telegram_id),
+                             from_user.get("username"), chat_id or 0,
+                             text or "", json.dumps(payload)),
+                        )
+                        _conn.commit()
+            except Exception as _log_err:
+                print(f"[sophia_webhook] unauthorized log error: {_log_err}")
+            # Send a polite redirect
+            if chat_id:
+                await send_sophia_message(chat_id,
+                "Hi — Sophia is Iosif Skorohodov's personal intelligence layer and isn't configured for outside conversations. "
+                "If you're trying to reach SKOpi Global Holdings, please email iosif@skopi.io. Thanks for understanding.")
+            return {"ok": True, "redirected": True}
+    except Exception as _owner_err:
+        print(f"[sophia_webhook] owner check error: {_owner_err}")
+    # === END OWNER CHECK (sophia) ===
+
+
     if chat_id:
         if text.lower() in ["/start", "hi", "hello", "hi sophia", "hello sophia", ""]:
             await send_sophia_message(chat_id, get_sophia_intro())
@@ -3344,6 +3393,54 @@ async def ophelia_webhook(request: Request):
     text = (message.get("text") or "").strip()
     from_user = message.get("from", {}) or {}
     sender_telegram_id = str(from_user.get("id", ""))
+    # === BLOCKLIST GUARD (ophelia, added 2026-04-27, doctrine locked) ===
+    try:
+        _telegram_user_id = (message.get("from") or {}).get("id")
+        if _telegram_user_id:
+            _blocked = await check_blocklist_and_archive(
+                telegram_user_id=_telegram_user_id,
+                chat_id=chat_id or 0,
+                message_text=text or "",
+                bot_name="ophelia",
+                message_type="text" if message.get("text") else ("caption" if message.get("caption") else "other"),
+                full_update=payload,
+            )
+            if _blocked:
+                return {"ok": True, "blocked": True}
+    except Exception as _e:
+        print(f"[ophelia_webhook] blocklist guard error: {_e}")
+    # === END BLOCKLIST GUARD ===
+    # === OWNER CHECK (ophelia, added 2026-04-27) ===
+    # Only the bound Telegram owner gets through to the LLM. Everyone else gets
+    # a polite redirect and is logged to unauthorized_contact_log.
+    try:
+        if sender_telegram_id and sender_telegram_id != "8058014097":
+            # Log the unauthorized contact attempt
+            try:
+                with get_db_connection() as _conn:
+                    with _conn.cursor() as _cur:
+                        _cur.execute(
+                            """INSERT INTO unauthorized_contact_log
+                               (bot_canonical_name, telegram_user_id, telegram_username, chat_id, message_text, full_update_json)
+                               VALUES (%s, %s, %s, %s, %s, %s)""",
+                            ("ophelia", int(sender_telegram_id),
+                             from_user.get("username"), chat_id or 0,
+                             text or "", json.dumps(payload)),
+                        )
+                        _conn.commit()
+            except Exception as _log_err:
+                print(f"[ophelia_webhook] unauthorized log error: {_log_err}")
+            # Send a polite redirect
+            if chat_id:
+                await send_ophelia_message(chat_id,
+                "Hi — Ophelia is Dan Wikert's personal SKOpi assistant and isn't configured for outside conversations. "
+                "If you're trying to reach SKOpi Global Holdings, please email iosif@skopi.io. Thanks for understanding.")
+            return {"ok": True, "redirected": True}
+    except Exception as _owner_err:
+        print(f"[ophelia_webhook] owner check error: {_owner_err}")
+    # === END OWNER CHECK (ophelia) ===
+
+
     if chat_id:
         if text.lower() in ["/start", "hi", "hello", "hi ophelia", "hello ophelia", ""]:
             await send_ophelia_message(chat_id, get_intro())
@@ -3411,20 +3508,35 @@ async def hypatia_webhook(request: Request):
     from_user = message.get("from", {}) or {}
     sender_id = str(from_user.get("id", ""))
 
-    # Auto-capture Fred's Telegram ID if we don't have it yet
-    if chat_id and sender_id:
-        import subprocess
-        subprocess.run(
-            ["python3", "-c",
-             f"open('/opt/nevsky-dev/kb/fred_telegram_id.txt','w').write('{sender_id}')"],
-            capture_output=True
-        )
 
     if chat_id:
-        from children.hypatia_child import maybe_send_welcome
+        import os
+        
+        # === BLOCKLIST GUARD (hypatia, added 2026-04-27, doctrine locked) ===
+        try:
+            _telegram_user_id = (message.get("from") or {}).get("id")
+            if _telegram_user_id:
+                _blocked = await check_blocklist_and_archive(
+                    telegram_user_id=_telegram_user_id,
+                    chat_id=chat_id or 0,
+                    message_text=text or "",
+                    bot_name="hypatia",
+                    message_type="text" if message.get("text") else ("caption" if message.get("caption") else "other"),
+                    full_update=payload,
+                )
+                if _blocked:
+                    return {"ok": True, "blocked": True}
+        except Exception as _e:
+            print(f"[hypatia_webhook] blocklist guard error: {_e}")
+        # === END BLOCKLIST GUARD ===
+        from children.hypatia_child import maybe_send_welcome, get_intro
+        # Capture first-contact state BEFORE maybe_send_welcome sets the flag
+        was_first_contact = not os.path.exists("/opt/nevsky-dev/kb/fred_welcome_sent.flag")
         await maybe_send_welcome(chat_id)
         if text.lower() in ["/start", "hi", "hello", "hi hypatia", "hello hypatia", ""]:
-            pass  # Welcome message already sent by maybe_send_welcome
+            # On repeat /start, send short intro. First contact already covered by welcome.
+            if not was_first_contact:
+                await send_hypatia_message(chat_id, get_intro())
         else:
             hypatia_reply = await ask_hypatia(user_message=text)
             await send_hypatia_message(chat_id, hypatia_reply)
