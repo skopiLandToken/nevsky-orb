@@ -1,0 +1,47 @@
+services:
+  nextcloud:
+    image: nextcloud:28
+    container_name: nevsky-nextcloud
+    restart: unless-stopped
+    ports:
+      - "3002:80"
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: nextcloud_db
+      POSTGRES_USER: nevsky
+      POSTGRES_PASSWORD: change_me_now
+      NEXTCLOUD_ADMIN_USER: admin
+      NEXTCLOUD_ADMIN_PASSWORD: ORBadmin2024!
+      NEXTCLOUD_TRUSTED_DOMAINS: "office.skopi.io 127.0.0.1 localhost"
+      OVERWRITEPROTOCOL: https
+      OVERWRITEHOST: office.skopi.io
+    volumes:
+      - nextcloud_data:/var/www/html
+    networks:
+      - nevsky-net
+
+  collabora:
+    image: collabora/code:latest
+    container_name: nevsky-collabora
+    restart: unless-stopped
+    ports:
+      - "3003:9980"
+    environment:
+      aliasgroup1: "https://office.skopi.io:443"
+      DONT_GEN_SSL_CERT: "YES"
+      extra_params: "--o:ssl.enable=false --o:ssl.termination=true"
+    cap_add:
+      - MKNOD
+    volumes:
+      - collabora_data:/opt/cool/systemplate
+    networks:
+      - nevsky-net
+
+volumes:
+  nextcloud_data:
+  collabora_data:
+
+networks:
+  nevsky-net:
+    external: true
+    name: nevsky-dev_default

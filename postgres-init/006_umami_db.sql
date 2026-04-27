@@ -1,0 +1,2 @@
+CREATE DATABASE umami_db;
+GRANT ALL PRIVILEGES ON DATABASE umami_db TO nevsky;

@@ -152,7 +152,7 @@ def get_active_owners():
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT email FROM users
-                    WHERE role IN ('founder', 'cso', 'admin', 'owner')
+                    WHERE role IN ('founder', 'cso', 'admin', 'owner', 'executive')
                     AND email IS NOT NULL
                     ORDER BY created_at ASC
                 """)
@@ -206,7 +206,21 @@ def poll_imap():
 
                 print(f"INFO: Processing email '{subject}' from {sender}")
 
-                for owner_email in owners:
+                # Determine which owner this email was addressed to
+                to_header = decode_mime_header(msg.get("To", "")).lower()
+                cc_header = decode_mime_header(msg.get("Cc", "")).lower()
+                delivered_to = decode_mime_header(msg.get("Delivered-To", "")).lower()
+                all_recipients = f"{to_header} {cc_header} {delivered_to}"
+
+                matched_owners = [o for o in owners if o.lower() in all_recipients]
+
+                if not matched_owners:
+                    matched_owners = [o for o in owners if "iosif" in o.lower()] or [owners[0]]
+                    print(f"INFO: No recipient match — defaulting to {matched_owners}")
+
+                print(f"INFO: Routing to {matched_owners}")
+
+                for owner_email in matched_owners:
                     payload = {
                         "owner_email": owner_email,
                         "sender_email": sender,

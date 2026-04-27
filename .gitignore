@@ -11,3 +11,23 @@ venv/
 .DS_Store
 logs/
 data/
+
+# === Backup files (added 2026-04-27) ===
+# Local backups created during edits; never commit
+.env.backup.*
+*.backup.*
+*.bak
+*.bak.*
+
+# === Local data + working state ===
+backups/
+
+# === Knowledge base content (private) ===
+# KB content is private business data; lives in DB + Nextcloud, not GitHub
+kb/
+
+# === IDE/editor cruft ===
+.vscode/
+.idea/
+*.swp
+*.swo
