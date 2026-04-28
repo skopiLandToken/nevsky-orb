@@ -319,6 +319,19 @@ def _is_rate_limit_error(err) -> bool:
     return "rate_limit" in s or "429" in s or "rate limit" in s
 
 
+
+def _is_timeout_error(err) -> bool:
+    """True if err looks like a request timeout / interrupted call."""
+    msg = str(err).lower()
+    return any(kw in msg for kw in (
+        "timed out",
+        "timeout",
+        "long-requests",
+        "request was cancelled",
+        "request cancellation",
+        "dropped connection",
+    ))
+
 def _friendly_error(err) -> str:
     if _is_rate_limit_error(err):
         return ("I am currently rate-limited (Tier 1 ceiling). "
@@ -366,8 +379,9 @@ async def _call_with_fallback(model: str, system: str, messages: list, tools: li
             system=system, messages=messages, tools=tools,
         ), model
     except Exception as e:
-        if _is_rate_limit_error(e) and model != light_model:
-            logger.warning("model=%s rate-limited, falling back to %s", model, light_model)
+        if (_is_rate_limit_error(e) or _is_timeout_error(e)) and model != light_model:
+            _err_kind = "rate-limited" if _is_rate_limit_error(e) else "timed-out"
+            logger.warning("model=%s %s, falling back to %s", model, _err_kind, light_model)
             return client.messages.create(
                 model=light_model, max_tokens=2500,
                 system=system, messages=messages, tools=tools,
