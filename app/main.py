@@ -189,6 +189,70 @@ async def send_sophia_message_with_markup(chat_id: int, text: str, reply_markup:
             return {}
 
 
+
+# ── TERRA-FIELD-7C: parcel button helpers ─────────────────────────────
+import re as _terra_re
+
+def _terra_extract_taxlot(reply_text: str) -> str | None:
+    """Find a taxlot id in a TERRA SCAN COMPLETE reply.
+    Taxlot format: 13-15 alphanumeric chars, often shown as `151319AC00139`
+    inside backticks or after 'taxlot' label."""
+    if not reply_text:
+        return None
+    # Backtick-wrapped (most common in our format)
+    m = _terra_re.search(r"`([0-9]{6}[A-Z]{0,2}[0-9]{2,8})`", reply_text)
+    if m:
+        return m.group(1)
+    # Fallback: bare match after 'taxlot' label
+    m = _terra_re.search(r"taxlot[:\s]+`?([0-9]{6}[A-Z]{0,2}[0-9]{2,8})`?", reply_text, _terra_re.IGNORECASE)
+    if m:
+        return m.group(1)
+    return None
+
+def _terra_build_parcel_keyboard(taxlot: str, property_id: str | None = None) -> dict:
+    """Build the inline_keyboard for a TERRA parcel card."""
+    kb_rows = [
+        [
+            {"text": "🔥 SCAN PERMITS", "callback_data": f"parcel_permits:{taxlot}"},
+            {"text": "💰 SALES HISTORY", "callback_data": f"parcel_sales:{taxlot}"},
+        ],
+        [
+            {"text": "📊 VALUATION", "callback_data": f"parcel_valuation:{taxlot}"},
+            {"text": "📁 DEV DOCS", "callback_data": f"parcel_devdocs:{taxlot}"},
+        ],
+    ]
+    # Direct-to-DIAL url button (no AI roundtrip — instant browser jump)
+    if property_id:
+        kb_rows.append([
+            {"text": "📋 OPEN DIAL", "url": f"http://dial.deschutes.org/Real/Index/{property_id}"}
+        ])
+    return {"inline_keyboard": kb_rows}
+
+def _terra_extract_property_id(reply_text: str) -> str | None:
+    """Pull the DIAL property_id from the reply if present (in dial_url)."""
+    if not reply_text:
+        return None
+    m = _terra_re.search(r"dial\.deschutes\.org/Real/Index/(\d+)", reply_text)
+    if m:
+        return m.group(1)
+    return None
+# ── END TERRA-FIELD-7C helpers ────────────────────────────────────────
+
+
+# ── TERRA-FIELD-7C-2: DIAL fetcher imports for parcel callbacks ──────
+try:
+    from children.orb_db import (
+        fetch_dial_permits,
+        fetch_dial_sales,
+        fetch_dial_valuation,
+        fetch_dial_dev_docs,
+    )
+    _TERRA_DIAL_AVAILABLE = True
+except ImportError as _e:
+    print(f"[main.py] WARN: DIAL fetchers not importable: {_e}")
+    _TERRA_DIAL_AVAILABLE = False
+# ── END TERRA imports ────────────────────────────────────────────────
+
 async def edit_telegram_message(chat_id: int, message_id: int, text: str, reply_markup: dict | None = None):
     """Edit an existing Telegram message in place."""
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -1592,7 +1656,14 @@ async def telegram_webhook(request: Request):
                 await send_ophelia_message(chat_id, _engine_get_intro("ophelia"))
             else:
                 _reply = await _engine_ask_child("ophelia", user_message=text)
-                await send_ophelia_message(chat_id, _reply)
+                # TERRA-FIELD-7C: detect parcel scan and add buttons
+                _taxlot = _terra_extract_taxlot(_reply) if "TERRA SCAN COMPLETE" in _reply else None
+                if _taxlot:
+                    _prop_id = _terra_extract_property_id(_reply)
+                    _kb = _terra_build_parcel_keyboard(_taxlot, _prop_id)
+                    await send_ophelia_message_with_markup(chat_id, _reply, _kb)
+                else:
+                    await send_ophelia_message(chat_id, _reply)
         except Exception as _engine_err:
             print(f"[unified_webhook ophelia] engine error: {_engine_err}")
             await send_ophelia_message(chat_id, "Ophelia hit an internal error. Iosif has been notified.")
@@ -1607,7 +1678,14 @@ async def telegram_webhook(request: Request):
                 await send_sophia_message(chat_id, _engine_get_intro("sophia"))
             else:
                 _reply = await _engine_ask_child("sophia", user_message=text)
-                await send_sophia_message(chat_id, _reply)
+                # TERRA-FIELD-7C: detect parcel scan and add buttons
+                _taxlot = _terra_extract_taxlot(_reply) if "TERRA SCAN COMPLETE" in _reply else None
+                if _taxlot:
+                    _prop_id = _terra_extract_property_id(_reply)
+                    _kb = _terra_build_parcel_keyboard(_taxlot, _prop_id)
+                    await send_sophia_message_with_markup(chat_id, _reply, _kb)
+                else:
+                    await send_sophia_message(chat_id, _reply)
         except Exception as _engine_err:
             print(f"[unified_webhook sophia] engine error: {_engine_err}")
             await send_sophia_message(chat_id, "Sophia hit an internal error. Yakov has been logged.")
@@ -2358,6 +2436,99 @@ async def process_telegram_callback_query(callback_query: dict, response_bot_tok
     else:
         action = data
         reminder_id = None
+
+    # ── TERRA-FIELD-7C-2: parcel button callback handlers ──────────────
+    if action.startswith("parcel_") and _TERRA_DIAL_AVAILABLE:
+        # data format: 'parcel_permits:<taxlot>'
+        taxlot = reminder_id  # the part after ':' was already extracted upstream
+        if not taxlot:
+            if callback_query_id:
+                await answer_telegram_callback_query(callback_query_id, "No taxlot in callback data.")
+            return {"ok": False, "reason": "missing_taxlot"}
+
+        # Acknowledge the tap immediately (Telegram shows loading toast)
+        ack_msg = {
+            "parcel_permits":   "🔥 Scanning permits…",
+            "parcel_sales":     "💰 Pulling sales history…",
+            "parcel_valuation": "📊 Loading valuation trend…",
+            "parcel_devdocs":   "📁 Checking development docs…",
+        }.get(action, "🛰️ Working…")
+        if callback_query_id:
+            await answer_telegram_callback_query(callback_query_id, ack_msg)
+
+        # Route to the matching DIAL fetcher
+        try:
+            if action == "parcel_permits":
+                _result = fetch_dial_permits(taxlot)
+                _tool_name = "fetch_dial_permits"
+            elif action == "parcel_sales":
+                _result = fetch_dial_sales(taxlot)
+                _tool_name = "fetch_dial_sales"
+            elif action == "parcel_valuation":
+                _result = fetch_dial_valuation(taxlot)
+                _tool_name = "fetch_dial_valuation"
+            elif action == "parcel_devdocs":
+                _result = fetch_dial_dev_docs(taxlot)
+                _tool_name = "fetch_dial_dev_docs"
+            else:
+                if chat_id:
+                    await send_telegram_message(chat_id, f"⚠️ Unknown parcel action: {action}")
+                return {"ok": False, "reason": f"unknown_parcel_action:{action}"}
+        except Exception as _terra_err:
+            print(f"[parcel_callback] DIAL fetch error for {action}/{taxlot}: {_terra_err}")
+            if chat_id:
+                await send_telegram_message(chat_id, f"⚠️ TERRA fetch error: {_terra_err}")
+            return {"ok": False, "reason": "dial_fetch_error"}
+
+        # Hand the raw result to the engine for TERRA-hype formatting
+        try:
+            from children.child_engine import ask_child as _engine_ask
+            import json as _json
+            from_user = callback_query.get("from", {}) or {}
+            sender_telegram_id = str(from_user.get("id", ""))
+            child_name = "ophelia" if (callable(globals().get("is_dan")) and is_dan(sender_telegram_id)) else "sophia"
+
+            format_prompt = (
+                f"The user tapped the {action.replace('parcel_', '').upper()} button on a TERRA parcel card "
+                f"for taxlot `{taxlot}`. The {_tool_name} tool returned this raw data:\n\n"
+                f"```json\n{_json.dumps(_result, indent=2, default=str)[:6000]}\n```\n\n"
+                f"Format this for the user using the FULL TERRA aesthetic — stars, dividers, emoji, "
+                f"section headers, max hype. Keep it scannable. End with one specific suggested follow-up. "
+                f"Do NOT call any tools — just format the data above."
+            )
+            _formatted = await _engine_ask(child_name, user_message=format_prompt)
+        except Exception as _fmt_err:
+            print(f"[parcel_callback] formatting error: {_fmt_err}")
+            import json as _json2
+            _formatted = (
+                f"🛰️ *TERRA — {action.replace('parcel_','').upper()}*\n\n"
+                f"Taxlot: `{taxlot}`\n\n"
+                f"```\n{_json2.dumps(_result, indent=2, default=str)[:3500]}\n```"
+            )
+
+        # Re-attach the parcel keyboard so user can chain to next layer
+        # (extract property_id from the formatted reply if available, same
+        # regex helper used at TERRA SCAN COMPLETE time)
+        try:
+            _chain_prop_id = _terra_extract_property_id(_formatted)
+        except Exception:
+            _chain_prop_id = None
+        _chain_kb = _terra_build_parcel_keyboard(taxlot, _chain_prop_id)
+
+        try:
+            if child_name == "sophia":
+                await send_sophia_message_with_markup(chat_id, _formatted, _chain_kb)
+            else:
+                await send_ophelia_message_with_markup(chat_id, _formatted, _chain_kb)
+            print(f"[parcel_callback] OK: action={action} taxlot={taxlot} child={child_name}")
+        except Exception as _send_err:
+            print(f"[parcel_callback] send error: {_send_err} (action={action})")
+            if chat_id:
+                # Last-resort fallback: plain message, no keyboard
+                await send_telegram_message(chat_id, _formatted)
+
+        return {"ok": True, "action": action, "taxlot": taxlot}
+    # ── END TERRA-FIELD-7C-2 parcel branches ────────────────────────────
 
     result_text = "Action received."
     action_type = None
@@ -3420,7 +3591,14 @@ async def sophia_webhook(request: Request):
                 await send_sophia_message(chat_id, _engine_intro("sophia"))
             else:
                 _reply = await _engine_ask("sophia", user_message=_query_text)
-                await send_sophia_message(chat_id, _reply)
+                # TERRA-FIELD-7C: detect parcel scan and add buttons
+                _taxlot = _terra_extract_taxlot(_reply) if "TERRA SCAN COMPLETE" in _reply else None
+                if _taxlot:
+                    _prop_id = _terra_extract_property_id(_reply)
+                    _kb = _terra_build_parcel_keyboard(_taxlot, _prop_id)
+                    await send_sophia_message_with_markup(chat_id, _reply, _kb)
+                else:
+                    await send_sophia_message(chat_id, _reply)
         except Exception as _engine_err:
             print(f"[sophia_webhook] engine error: {_engine_err}")
             await send_sophia_message(chat_id, "Sophia hit an internal error. Yakov has been logged.")
@@ -3505,7 +3683,14 @@ async def ophelia_webhook(request: Request):
                 await send_ophelia_message(chat_id, _engine_intro("ophelia"))
             else:
                 _reply = await _engine_ask("ophelia", user_message=_query_text)
-                await send_ophelia_message(chat_id, _reply)
+                # TERRA-FIELD-7C: detect parcel scan and add buttons
+                _taxlot = _terra_extract_taxlot(_reply) if "TERRA SCAN COMPLETE" in _reply else None
+                if _taxlot:
+                    _prop_id = _terra_extract_property_id(_reply)
+                    _kb = _terra_build_parcel_keyboard(_taxlot, _prop_id)
+                    await send_ophelia_message_with_markup(chat_id, _reply, _kb)
+                else:
+                    await send_ophelia_message(chat_id, _reply)
         except Exception as _engine_err:
             print(f"[ophelia_webhook] engine error: {_engine_err}")
             await send_ophelia_message(chat_id, "Ophelia hit an internal error. Iosif has been notified.")
