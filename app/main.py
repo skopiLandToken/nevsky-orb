@@ -3404,13 +3404,22 @@ async def sophia_webhook(request: Request):
 
 
     # === ENGINE ROUTING (E2 Step 2, sophia, 2026-04-28) ===
+    # === TERRA LOCATION PIN (sophia, 2026-04-28) ===
+    _location = message.get("location") or {}
+    _query_text = text
+    if _location and _location.get("latitude") is not None and _location.get("longitude") is not None:
+        _lat = _location["latitude"]
+        _lon = _location["longitude"]
+        _query_text = f"User dropped a Telegram location pin at coordinates {_lat}, {_lon}. What parcel is at this location? Use lookup_parcel_by_point and report findings clearly."
+        print(f"[sophia_webhook] TERRA pin: lat={_lat} lon={_lon}")
+    # === END TERRA LOCATION PIN (sophia) ===
     if chat_id:
         try:
             from children.child_engine import ask_child as _engine_ask, get_intro as _engine_intro
-            if text.lower() in ["/start", "hi", "hello", "hi sophia", "hello sophia", ""]:
+            if _query_text.lower() in ["/start", "hi", "hello", "hi sophia", "hello sophia", ""]:
                 await send_sophia_message(chat_id, _engine_intro("sophia"))
             else:
-                _reply = await _engine_ask("sophia", user_message=text)
+                _reply = await _engine_ask("sophia", user_message=_query_text)
                 await send_sophia_message(chat_id, _reply)
         except Exception as _engine_err:
             print(f"[sophia_webhook] engine error: {_engine_err}")
@@ -3480,13 +3489,22 @@ async def ophelia_webhook(request: Request):
 
 
     # === ENGINE ROUTING (E2 Step 2, ophelia, 2026-04-28) ===
+    # === TERRA LOCATION PIN (ophelia, 2026-04-28) ===
+    _location = message.get("location") or {}
+    _query_text = text
+    if _location and _location.get("latitude") is not None and _location.get("longitude") is not None:
+        _lat = _location["latitude"]
+        _lon = _location["longitude"]
+        _query_text = f"User dropped a Telegram location pin at coordinates {_lat}, {_lon}. What parcel is at this location? Use lookup_parcel_by_point and report findings clearly."
+        print(f"[ophelia_webhook] TERRA pin: lat={_lat} lon={_lon}")
+    # === END TERRA LOCATION PIN (ophelia) ===
     if chat_id:
         try:
             from children.child_engine import ask_child as _engine_ask, get_intro as _engine_intro
-            if text.lower() in ["/start", "hi", "hello", "hi ophelia", "hello ophelia", ""]:
+            if _query_text.lower() in ["/start", "hi", "hello", "hi ophelia", "hello ophelia", ""]:
                 await send_ophelia_message(chat_id, _engine_intro("ophelia"))
             else:
-                _reply = await _engine_ask("ophelia", user_message=text)
+                _reply = await _engine_ask("ophelia", user_message=_query_text)
                 await send_ophelia_message(chat_id, _reply)
         except Exception as _engine_err:
             print(f"[ophelia_webhook] engine error: {_engine_err}")

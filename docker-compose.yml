@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: garapadev/postgres-postgis-pgvector:16-optimized
     container_name: nevsky-postgres
     restart: unless-stopped
     environment:

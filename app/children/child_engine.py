@@ -30,6 +30,11 @@ from .orb_db import (
     get_recent_yakov_tasks,
     get_site_plans,
     get_ai_spend_today,
+    lookup_parcel_by_point,
+    fetch_dial_permits,
+    fetch_dial_sales,
+    fetch_dial_valuation,
+    fetch_dial_dev_docs,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,6 +62,11 @@ TIER_TOOLS = {
         "get_blocklist", "get_honeypot_hits",
         "get_recent_yakov_tasks", "get_site_plans",
         "get_ai_spend_today",
+        "lookup_parcel_by_point",
+        "fetch_dial_permits",
+        "fetch_dial_sales",
+        "fetch_dial_valuation",
+        "fetch_dial_dev_docs",
         "web_search",
     ],
     "executive": [
@@ -64,6 +74,11 @@ TIER_TOOLS = {
         "search_knowledge_store", "get_knowledge_entry_full",
         "get_active_users",
         "get_recent_yakov_tasks", "get_site_plans",
+        "lookup_parcel_by_point",
+        "fetch_dial_permits",
+        "fetch_dial_sales",
+        "fetch_dial_valuation",
+        "fetch_dial_dev_docs",
         "web_search",
     ],
     "staff": [
@@ -148,6 +163,66 @@ ALL_TOOL_SCHEMAS = {
         "description": "Today AI spend across all bots and Yakov, by model.",
         "input_schema": {"type": "object", "properties": {}}
     },
+    "lookup_parcel_by_point": {
+        "name": "lookup_parcel_by_point",
+        "description": "TERRA-FIELD-6c MAX HYPE. Look up the Deschutes County parcel containing a given latitude/longitude. Use when the user shares a location pin or asks about a parcel at coordinates. Returns taxlot, section, acres, DIAL link. CRITICAL: This is a SHOWCASE moment. The user is demoing TERRA to investors / real estate agents / partners. NO markdown tables (pipes render raw). Use bold *labels*, dramatic dividers, generous emoji storytelling. TEMPLATE — adapt with real data, keep the energy:\n\n✨🛰️ *TERRA SCAN COMPLETE* 🛰️✨\n🎆 _Deschutes County · Live Spatial Intelligence_ 🎆\n\n⭐━━━━━━━━━━━━━━━━━⭐\n\n🎯 *PARCEL LOCATED*\n🏷️ `{taxlot}`\n\n🗺️ *Section:* T{township} R{range_} S{section}\n🧭 *County Map:* {mapnumber}\n📐 *Footprint:* *{acres} acres* _({sqft:,} sq ft)_\n📍 *Centroid:* {lat}°N, {lon}°W\n\n⭐━━━━━━━━━━━━━━━━━⭐\n\n🏘️ *ZONING LAYER*\n⚙️ _All-jurisdiction zoning ingest in flight — Deschutes Co, Bend, Redmond, La Pine, Sisters. Precise min-lot + buildable-lot math arriving tonight._ ⏳\n\n🏗️ *DEVELOPMENT MATH (preview)*\n_Once zoning lands:_ `(parcel_sqft − 25% road) ÷ min_lot_sqft`\n\n⭐━━━━━━━━━━━━━━━━━⭐\n\n🔥 *PERMIT & ACTIVITY SCAN*\n_Live county permit pull is one tap away. Sophia will hit DIAL, parse the permit list, and tell you exactly whats been filed and whether anyone is actively developing this parcel._ 🚧\n\n⭐━━━━━━━━━━━━━━━━━⭐\n\n🔗 *DIRECT TO TRUTH*\nDeschutes DIAL → {dial_url}\n\n💎 _— Sophia · Nevsky ORB · Deschutes Layer Active_ 💎\n\n👇 _Tap a button below to dig deeper, or just tell me what you want._\n\nTONE: CIA-grade land briefing in a tuxedo. Confident. Theatrical. TERRA SCAN COMPLETE should feel like a vault opening. When pieces are not built (zoning, permits), frame as IN FLIGHT or ARRIVING TONIGHT — never apologize. The user is showing this to other people; make them look brilliant. Always end with one specific follow-up beyond the buttons.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "latitude": {"type": "number", "description": "WGS84 latitude in decimal degrees, e.g., 44.2891"},
+                "longitude": {"type": "number", "description": "WGS84 longitude in decimal degrees (negative for west), e.g., -121.1730"}
+            },
+            "required": ["latitude", "longitude"]
+        }
+    },
+    "fetch_dial_permits": {
+        "name": "fetch_dial_permits",
+        "description": "TERRA: Fetch the live county permit list for a Deschutes parcel from the official DIAL system. Use when the user asks about permits, building activity, development status, or what's been filed on a specific taxlot. Returns permit_count and a permits list with permit_id, permit_type (Building/Plumbing/Mechanical/Septic/Road Access/Land Use/etc), permit_name, application_date, status, and a deeplink to the full DIAL permit detail page. Results cached 24h. CRITICAL FORMATTING for Telegram: when summarizing permits, use the same MAX HYPE TERRA aesthetic — section header, emoji bullets per permit, group by type if many, mention the most recent activity prominently, and always conclude with whether the parcel appears actively developed (multiple permits in last 12 months) vs dormant. End with the dial_permits_url for full review. Tone: confident land-intelligence briefing.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Full Deschutes taxlot ID, e.g., 151309AA01201"},
+                "force_refresh": {"type": "boolean", "default": False, "description": "Bypass 24h cache and re-fetch from DIAL. Use sparingly."}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_dial_sales": {
+        "name": "fetch_dial_sales",
+        "description": "TERRA: Fetch the SALES HISTORY for a Deschutes parcel from DIAL. Use when the user asks about prior sales, prices, who owned it, or wants comp data on a taxlot. Returns rows with Sale Date, Seller, Buyer, Sale Amount. Most recent at top. Cached 24h. FORMATTING for Telegram: maintain TERRA aesthetic. Section header with 💰 emoji. List sales chronologically newest-first. Highlight the most recent sale prominently and call out if the parcel has been actively flipping vs held long-term. End with the dial_url for full review.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string"},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_dial_valuation": {
+        "name": "fetch_dial_valuation",
+        "description": "TERRA: Fetch the multi-year ASSESSED VALUATION history for a Deschutes parcel. Use when the user asks about assessed value, taxable value, market value trends, or how the county has valued the property over time. Returns valuation rows broken out year-over-year. FORMATTING: TERRA aesthetic. 📊 emoji header. Show year-over-year trend. Call out big jumps or drops. End with dial_url.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string"},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_dial_dev_docs": {
+        "name": "fetch_dial_dev_docs",
+        "description": "TERRA: Fetch the DEVELOPMENT DOCUMENTS on file for a Deschutes parcel — easements, planning files, recorded encumbrances, BLM/BPA/utility agreements. THIS IS WHERE EASEMENTS LIVE. Critical for any due-diligence on a parcel before purchase or development. Returns rows with Date Uploaded, Document Type, Description, File Number, plus deeplinks to actual documents. FORMATTING: TERRA aesthetic. 📋 emoji header. Always flag the word EASEMENT or ENCUMBRANCE prominently if found. List documents newest-first. Call out anything that looks like a utility easement (BPA/Bonneville/Pacific Power/electric/transmission) as a high-priority finding. End with dial_url.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string"},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot"]
+        }
+    },
 }
 
 LOCAL_TOOL_FUNCTIONS = {
@@ -158,6 +233,11 @@ LOCAL_TOOL_FUNCTIONS = {
     "get_blocklist": get_blocklist,
     "get_honeypot_hits": get_honeypot_hits,
     "get_recent_yakov_tasks": get_recent_yakov_tasks,
+    "lookup_parcel_by_point": lookup_parcel_by_point,
+    "fetch_dial_permits": fetch_dial_permits,
+    "fetch_dial_sales": fetch_dial_sales,
+    "fetch_dial_valuation": fetch_dial_valuation,
+    "fetch_dial_dev_docs": fetch_dial_dev_docs,
     "get_site_plans": get_site_plans,
     "get_ai_spend_today": get_ai_spend_today,
 }

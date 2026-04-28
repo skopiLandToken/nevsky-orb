@@ -252,3 +252,358 @@ def get_ai_spend_today() -> dict:
     except Exception as e:
         logger.error("get_ai_spend_today error: %s", e)
         return {"today": {}, "by_model": [], "error": str(e)}
+
+
+
+def lookup_parcel_by_point(latitude: float, longitude: float) -> dict:
+    """Spatial lookup: Deschutes County parcel containing a lat/lon point."""
+    try:
+        lat = float(latitude)
+        lon = float(longitude)
+    except (TypeError, ValueError):
+        return {"found": False, "reason": "Invalid coordinates"}
+
+    if not (43.5 <= lat <= 44.5) or not (-122.1 <= lon <= -119.8):
+        return {"found": False, "reason": f"Point ({lat}, {lon}) outside Deschutes County. TERRA covers Deschutes only."}
+
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT taxlot,
+                       township || '-' || range_ || '-' || section AS section_id,
+                       ROUND((shape_area / 43560.0)::numeric, 3) AS acres,
+                       dial_url,
+                       ST_AsText(ST_Centroid(geom)) AS parcel_centroid,
+                       mapnumber
+                FROM parcels_deschutes
+                WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+                LIMIT 1
+                """,
+                (lon, lat),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        return {"found": False, "reason": f"No parcel contains point ({lat}, {lon}). May be road or right-of-way."}
+
+    return {
+        "found": True,
+        "taxlot": row["taxlot"],
+        "section_id": row["section_id"],
+        "acres": float(row["acres"]) if row["acres"] is not None else None,
+        "dial_url": row["dial_url"],
+        "parcel_centroid": row["parcel_centroid"],
+        "mapnumber": row["mapnumber"],
+        "development_status": "unknown",
+        "development_note": "Tier 2 permit watch not yet built. Permit-derived signals coming.",
+        "queried_lat": lat,
+        "queried_lon": lon,
+    }
+
+
+
+# =============================================================================
+# DIAL Permit Fetcher (TERRA-FIELD-7A)
+# =============================================================================
+import re as _re
+import json as _json
+import httpx as _httpx
+from bs4 import BeautifulSoup as _BS
+from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+_DIAL_BASE = "http://dial.deschutes.org"
+_DIAL_USER_AGENT = "Mozilla/5.0 SKOpi-TERRA/1.0 (+https://skopi.io)"
+_DIAL_CACHE_TTL_HOURS = 24
+
+
+def _dial_resolve_property_id(taxlot: str) -> str | None:
+    """Hit taxlot endpoint, follow 302 to find /Real/Index/{property_id}."""
+    url = f"{_DIAL_BASE}/results/taxlot?value={taxlot}"
+    try:
+        with _httpx.Client(follow_redirects=False, timeout=15.0,
+                           headers={"User-Agent": _DIAL_USER_AGENT}) as c:
+            r = c.get(url)
+            if r.status_code in (301, 302, 303, 307, 308):
+                loc = r.headers.get("Location", "")
+                m = _re.search(r"/Real/Index/(\d+)", loc)
+                if m:
+                    return m.group(1)
+            # Fallback: maybe page rendered directly with a Permits link
+            soup = _BS(r.text, "html.parser")
+            for a in soup.find_all("a", href=True):
+                m = _re.search(r"/Real/Permits/(\d+)", a["href"])
+                if m:
+                    return m.group(1)
+    except Exception as e:
+        print(f"[dial] resolve property_id error: {e}")
+    return None
+
+
+def _dial_parse_permits_html(html: str, property_id: str) -> list[dict]:
+    """Parse the infoTable on /Real/Permits/{property_id} into a list of permit dicts."""
+    soup = _BS(html, "html.parser")
+    table = soup.find("table", class_="infoTable")
+    if not table:
+        return []
+
+    permits = []
+    for tr in table.find_all("tr"):
+        cells = tr.find_all("td")
+        if len(cells) < 5:
+            continue
+        # First cell typically contains an <a> with the permit ID + deeplink
+        first_link = cells[0].find("a", href=True)
+        permit_id = (first_link.get_text(strip=True) if first_link else cells[0].get_text(strip=True))
+        deeplink = (_DIAL_BASE + first_link["href"]) if first_link else None
+
+        permits.append({
+            "permit_id": permit_id,
+            "permit_type": cells[1].get_text(strip=True),
+            "permit_name": cells[2].get_text(strip=True),
+            "application_date": cells[3].get_text(strip=True),
+            "status": cells[4].get_text(strip=True),
+            "deeplink": deeplink,
+        })
+
+    return permits
+
+
+def fetch_dial_permits(taxlot: str, force_refresh: bool = False) -> dict:
+    """
+    Fetch permit list for a Deschutes parcel from the county DIAL system.
+    Returns {found: bool, taxlot, property_id, permit_count, permits, fetched_at, cached_age_hours, dial_permits_url}.
+    Cached 24h in dial_permit_cache table — idempotent, polite to county servers.
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    # Cache check
+    if not force_refresh:
+        try:
+            with _conn() as cn:
+                with cn.cursor() as cur:
+                    cur.execute(
+                        "SELECT taxlot, property_id, permits_json, permit_count, fetched_at, last_error FROM dial_permit_cache WHERE taxlot = %s",
+                        (taxlot,),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        age = _dt.now(_tz.utc) - row["fetched_at"]
+                        if age < _td(hours=_DIAL_CACHE_TTL_HOURS):
+                            return {
+                                "found": True,
+                                "from_cache": True,
+                                "cached_age_hours": round(age.total_seconds() / 3600, 1),
+                                "taxlot": taxlot,
+                                "property_id": row["property_id"],
+                                "permit_count": row["permit_count"],
+                                "permits": row["permits_json"] or [],
+                                "fetched_at": row["fetched_at"].isoformat(),
+                                "dial_permits_url": f"{_DIAL_BASE}/Real/Permits/{row['property_id']}" if row["property_id"] else None,
+                            }
+        except Exception as e:
+            print(f"[dial] cache read error: {e}")
+
+    # Live fetch
+    property_id = _dial_resolve_property_id(taxlot)
+    if not property_id:
+        err = f"Could not resolve property_id for taxlot {taxlot}. May not exist in DIAL."
+        try:
+            with _conn() as cn:
+                with cn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO dial_permit_cache (taxlot, property_id, permits_json, permit_count, fetched_at, last_error)
+                           VALUES (%s, NULL, '[]'::jsonb, 0, NOW(), %s)
+                           ON CONFLICT (taxlot) DO UPDATE SET fetched_at = NOW(), last_error = EXCLUDED.last_error""",
+                        (taxlot, err),
+                    )
+                    cn.commit()
+        except Exception:
+            pass
+        return {"found": False, "reason": err}
+
+    permits_url = f"{_DIAL_BASE}/Real/Permits/{property_id}"
+    try:
+        with _httpx.Client(follow_redirects=True, timeout=20.0,
+                           headers={"User-Agent": _DIAL_USER_AGENT}) as c:
+            r = c.get(permits_url)
+            r.raise_for_status()
+            permits = _dial_parse_permits_html(r.text, property_id)
+    except Exception as e:
+        return {"found": False, "reason": f"DIAL fetch error: {e}", "property_id": property_id, "dial_permits_url": permits_url}
+
+    # Save to cache
+    try:
+        with _conn() as cn:
+            with cn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO dial_permit_cache (taxlot, property_id, permits_json, permit_count, fetched_at, last_error)
+                       VALUES (%s, %s, %s::jsonb, %s, NOW(), NULL)
+                       ON CONFLICT (taxlot) DO UPDATE SET
+                           property_id = EXCLUDED.property_id,
+                           permits_json = EXCLUDED.permits_json,
+                           permit_count = EXCLUDED.permit_count,
+                           fetched_at = NOW(),
+                           last_error = NULL""",
+                    (taxlot, property_id, _json.dumps(permits), len(permits)),
+                )
+                cn.commit()
+    except Exception as e:
+        print(f"[dial] cache write error: {e}")
+
+    return {
+        "found": True,
+        "from_cache": False,
+        "taxlot": taxlot,
+        "property_id": property_id,
+        "permit_count": len(permits),
+        "permits": permits,
+        "dial_permits_url": permits_url,
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+
+
+# =============================================================================
+# DIAL Section Scraper (TERRA-FIELD-7B)
+# Generic infoTable parser — wrappers for Sales, Valuation, DevDocs, etc.
+# =============================================================================
+_DIAL_SECTION_TTL_HOURS = 24
+
+
+def _dial_fetch_section(taxlot: str, section: str, force_refresh: bool = False) -> dict:
+    """
+    Generic fetcher for any /Real/{section}/{property_id} DIAL endpoint that
+    renders a <table class='infoTable'>. Returns parsed rows + metadata.
+    Cached per (taxlot, section) for 24h in dial_section_cache.
+    """
+    if not taxlot or not section:
+        return {"found": False, "reason": "Missing taxlot or section"}
+    taxlot = taxlot.strip().upper()
+    section = section.strip()
+
+    # Cache check
+    if not force_refresh:
+        try:
+            with _conn() as cn:
+                with cn.cursor() as cur:
+                    cur.execute(
+                        "SELECT taxlot, section, property_id, rows_json, row_count, fetched_at FROM dial_section_cache WHERE taxlot = %s AND section = %s",
+                        (taxlot, section),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        age = _dt.now(_tz.utc) - row["fetched_at"]
+                        if age < _td(hours=_DIAL_SECTION_TTL_HOURS):
+                            return {
+                                "found": True,
+                                "from_cache": True,
+                                "cached_age_hours": round(age.total_seconds() / 3600, 1),
+                                "taxlot": taxlot,
+                                "section": section,
+                                "property_id": row["property_id"],
+                                "row_count": row["row_count"],
+                                "rows": row["rows_json"] or [],
+                                "dial_url": f"{_DIAL_BASE}/Real/{section}/{row['property_id']}" if row["property_id"] else None,
+                                "fetched_at": row["fetched_at"].isoformat(),
+                            }
+        except Exception as e:
+            print(f"[dial_section] cache read error: {e}")
+
+    # Live fetch
+    property_id = _dial_resolve_property_id(taxlot)
+    if not property_id:
+        return {"found": False, "reason": f"Could not resolve property_id for taxlot {taxlot}", "section": section}
+
+    section_url = f"{_DIAL_BASE}/Real/{section}/{property_id}"
+    try:
+        with _httpx.Client(follow_redirects=True, timeout=20.0,
+                           headers={"User-Agent": _DIAL_USER_AGENT}) as c:
+            r = c.get(section_url)
+            r.raise_for_status()
+            html = r.text
+    except Exception as e:
+        return {"found": False, "reason": f"DIAL fetch error: {e}", "property_id": property_id, "dial_url": section_url}
+
+    # Parse the infoTable into [{header: cell_value, ...}, ...]
+    soup = _BS(html, "html.parser")
+    table = soup.find("table", class_="infoTable")
+    rows = []
+    if table:
+        # Headers: collect from <th> elements (skip if no <td> in same row, those are header rows)
+        header_cells = []
+        for tr in table.find_all("tr"):
+            ths = tr.find_all("th")
+            tds = tr.find_all("td")
+            if ths and not tds:
+                # Pure header row — extract header text, stripping any nested <span> tooltips
+                header_cells = [_re.sub(r"\s+", " ", th.get_text(separator=" ", strip=True)).strip() for th in ths]
+                continue
+            if tds:
+                # Data row — pair cells with headers
+                values = []
+                links = []
+                for td in tds:
+                    val = _re.sub(r"\s+", " ", td.get_text(separator=" ", strip=True)).strip()
+                    values.append(val)
+                    a = td.find("a", href=True)
+                    if a:
+                        href = a["href"]
+                        if href.startswith("/"):
+                            href = _DIAL_BASE + href
+                        links.append(href)
+                row_dict = {}
+                for i, val in enumerate(values):
+                    key = header_cells[i] if i < len(header_cells) else f"col_{i}"
+                    row_dict[key] = val
+                if links:
+                    row_dict["_links"] = links
+                rows.append(row_dict)
+
+    # Cache write
+    try:
+        with _conn() as cn:
+            with cn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO dial_section_cache (taxlot, section, property_id, rows_json, row_count, fetched_at, last_error)
+                       VALUES (%s, %s, %s, %s::jsonb, %s, NOW(), NULL)
+                       ON CONFLICT (taxlot, section) DO UPDATE SET
+                           property_id = EXCLUDED.property_id,
+                           rows_json = EXCLUDED.rows_json,
+                           row_count = EXCLUDED.row_count,
+                           fetched_at = NOW(),
+                           last_error = NULL""",
+                    (taxlot, section, property_id, _json.dumps(rows), len(rows)),
+                )
+                cn.commit()
+    except Exception as e:
+        print(f"[dial_section] cache write error: {e}")
+
+    return {
+        "found": True,
+        "from_cache": False,
+        "taxlot": taxlot,
+        "section": section,
+        "property_id": property_id,
+        "row_count": len(rows),
+        "rows": rows,
+        "dial_url": section_url,
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+
+def fetch_dial_sales(taxlot: str, force_refresh: bool = False) -> dict:
+    """Sales history for a Deschutes parcel. Returns sale_date, seller, buyer, sale_amount per row."""
+    return _dial_fetch_section(taxlot, "Sales", force_refresh)
+
+
+def fetch_dial_valuation(taxlot: str, force_refresh: bool = False) -> dict:
+    """Multi-year assessed value history for a Deschutes parcel."""
+    return _dial_fetch_section(taxlot, "Valuation", force_refresh)
+
+
+def fetch_dial_dev_docs(taxlot: str, force_refresh: bool = False) -> dict:
+    """Development documents on file: easements, planning files, recorded encumbrances."""
+    return _dial_fetch_section(taxlot, "DevelopmentDocs", force_refresh)
