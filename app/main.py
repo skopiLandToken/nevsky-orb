@@ -21,6 +21,7 @@ from children.child_engine import ask_child as _engine_ask_child
 from children.child_engine import get_intro as _engine_get_intro
 from children.child_engine import is_owner as _engine_is_owner
 from children.child_engine import load_child as _engine_load_child
+from children.cross_child_drafter import draft_cross_child_message
 
 
 def is_dan(telegram_id: str) -> bool:
@@ -43,6 +44,17 @@ def is_fred(telegram_id: str) -> bool:
 
 app = FastAPI(title="Nevsky API", version="0.1.0")
 app.include_router(biography_router)
+
+# ── Static file hosting for /share/* (public-readable HTML pages) ───
+from fastapi.staticfiles import StaticFiles
+import os as _share_os
+_share_dir = "/app/public/share"
+if _share_os.path.isdir(_share_dir):
+    app.mount("/share", StaticFiles(directory=_share_dir, html=False), name="share")
+    print(f"[main.py] /share/* mounted from {_share_dir}")
+else:
+    print(f"[main.py] WARN: /share dir not found at {_share_dir}, skipping mount")
+# ── END /share mount ───────────────────────────────────────────────
 
 app.add_middleware(
     CORSMiddleware,
@@ -83,6 +95,21 @@ class IngestEmailRequest(BaseModel):
     thread_id: str | None = None
     contact_email: str | None = None
     project_id: str | None = None
+
+
+# ── CROSS-CHILD-DRAFT models (Sophia↔Ophelia messaging) ──────────────
+class DraftMessageRequest(BaseModel):
+    """Iosif's free-text intent + optional operational context."""
+    intent: str
+    operational_context: dict | None = None
+    initiating_user_id: str | None = None  # defaults to Iosif if not provided
+
+
+class EditDraftRequest(BaseModel):
+    """Iosif's revised text after tapping Edit on the approval card."""
+    ai_to_ai_message: str | None = None
+    outbound_message: str | None = None
+# ── END CROSS-CHILD-DRAFT models ─────────────────────────────────────
 
 async def send_telegram_message(chat_id: int, text: str, reply_markup: dict | None = None):
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -4260,3 +4287,390 @@ async def site_plans_get(plan_id: str):
 
 
 # === SITE_PLANS_ROUTES_END ===
+
+
+# ═════════════════════════════════════════════════════════════════════
+# CROSS-CHILD-DRAFT (CCD): Sophia↔Ophelia messaging endpoints
+# Patch 3-a v2 — endpoints + DB + audit (audit calls take cur, defensively wrapped)
+# ═════════════════════════════════════════════════════════════════════
+
+_CCD_DEFAULT_INITIATOR_ID = "8892125a-0d06-4544-a4bf-4278ac1b1360"
+
+_CCD_CHILD_BOTS = {
+    "sophia": "SOPHIA_BOT_TOKEN",
+    "ophelia": "OPHELIA_BOT_TOKEN",
+    "hypatia": "HYPATIA_BOT_TOKEN",
+}
+
+
+def _ccd_safe_audit(cur, **kwargs):
+    """Audit log with try/except — never crash the endpoint on logging failure."""
+    try:
+        write_audit_log(cur, **kwargs)
+    except Exception as e:
+        print(f"[ccd] audit_log warning (non-fatal): {e}")
+
+
+def _ccd_lookup_target_telegram_id(target_user_id: str) -> str | None:
+    if not target_user_id:
+        return None
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT telegram_user_id FROM users WHERE id = %s::uuid",
+                    (target_user_id,),
+                )
+                row = cur.fetchone()
+                if row and row[0]:
+                    return str(row[0])
+    except Exception as e:
+        print(f"[ccd] lookup_target_telegram_id error: {e}")
+    return None
+
+
+def _ccd_resolve_target_user_id(target_human_name: str | None) -> str | None:
+    if not target_human_name:
+        return None
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id FROM users WHERE full_name ILIKE %s LIMIT 1",
+                    (f"%{target_human_name}%",),
+                )
+                row = cur.fetchone()
+                if row:
+                    return str(row[0])
+    except Exception as e:
+        print(f"[ccd] resolve_target_user_id error: {e}")
+    return None
+
+
+async def _ccd_send_outbound(child: str, target_telegram_id: str, text: str) -> tuple[bool, str | None]:
+    if child not in _CCD_CHILD_BOTS:
+        return False, f"unknown child: {child}"
+    try:
+        if child == "sophia":
+            await send_sophia_message(int(target_telegram_id), text)
+        elif child == "ophelia":
+            await send_ophelia_message(int(target_telegram_id), text)
+        elif child == "hypatia":
+            await send_hypatia_message(int(target_telegram_id), text)
+        return True, None
+    except Exception as e:
+        return False, f"send_failed: {e}"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# POST /sophia/draft-message
+# ─────────────────────────────────────────────────────────────────────
+@app.post("/sophia/draft-message")
+async def ccd_draft_message(req: DraftMessageRequest):
+    initiating_user_id = req.initiating_user_id or _CCD_DEFAULT_INITIATOR_ID
+
+    draft = await draft_cross_child_message(req.intent, req.operational_context)
+    intent_type = draft.get("intent_type")
+
+    # Block / error short-circuit
+    if intent_type in ("blocked", "error"):
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    _ccd_safe_audit(
+                        cur,
+                        user_id=initiating_user_id,
+                        action_type="cross_child.draft_blocked" if intent_type == "blocked" else "cross_child.draft_error",
+                        object_type="cross_child_draft",
+                        object_id=None,
+                        recommendation_summary=draft.get("blocked_reason") or draft.get("error"),
+                        human_decision=None,
+                        execution_status="blocked" if intent_type == "blocked" else "failed",
+                        error_message=draft.get("notes_for_iosif") or draft.get("raw_response"),
+                    )
+                    conn.commit()
+        except Exception as e:
+            print(f"[ccd] block-path audit error (non-fatal): {e}")
+        return {"status": intent_type, "draft": draft}
+
+    target_user_id = _ccd_resolve_target_user_id(draft.get("target_human"))
+
+    # INSERT + audit in one transaction
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO cross_child_drafts (
+                        initiating_user_id, intent_text, intent_parsed,
+                        from_child, to_child, target_human_user_id,
+                        ai_to_ai_message, outbound_message, status
+                    ) VALUES (
+                        %s::uuid, %s, %s::jsonb,
+                        %s, %s, %s,
+                        %s, %s, 'pending_approval'
+                    )
+                    RETURNING id, status, created_at
+                    """,
+                    (
+                        initiating_user_id,
+                        req.intent,
+                        __import__("json").dumps(draft),
+                        draft.get("from_child", "sophia"),
+                        draft.get("to_child", "ophelia"),
+                        target_user_id,
+                        draft.get("ai_to_ai_message", ""),
+                        draft.get("outbound_message", ""),
+                    ),
+                )
+                row = cur.fetchone()
+                draft_id = str(row[0])
+                created_at = row[2]
+
+                _ccd_safe_audit(
+                    cur,
+                    user_id=initiating_user_id,
+                    action_type="cross_child.draft_requested",
+                    object_type="cross_child_draft",
+                    object_id=draft_id,
+                    recommendation_summary=draft.get("context_summary"),
+                    human_decision=None,
+                    execution_status="success",
+                    error_message=None,
+                )
+                conn.commit()
+    except Exception as e:
+        print(f"[ccd] draft-message INSERT error: {e}")
+        return {"status": "error", "error": f"db_insert_failed: {e}"}
+
+    print(f"[ccd] draft created: id={draft_id} from={draft.get('from_child')} to={draft.get('to_child')} target={draft.get('target_human')}")
+
+    return {
+        "status": "pending_approval",
+        "draft_id": draft_id,
+        "created_at": str(created_at),
+        "draft": draft,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# POST /sophia/approve-draft/{draft_id}
+# ─────────────────────────────────────────────────────────────────────
+@app.post("/sophia/approve-draft/{draft_id}")
+async def ccd_approve_draft(draft_id: str):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT initiating_user_id, from_child, to_child,
+                           target_human_user_id, ai_to_ai_message, outbound_message,
+                           status
+                    FROM cross_child_drafts
+                    WHERE id = %s::uuid
+                    """,
+                    (draft_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return {"status": "error", "error": "draft_not_found"}
+                (initiating_user_id, from_child, to_child, target_user_id,
+                 ai_to_ai_message, outbound_message, current_status) = row
+    except Exception as e:
+        return {"status": "error", "error": f"db_fetch_failed: {e}"}
+
+    if current_status not in ("pending_approval", "edited"):
+        return {"status": "error", "error": "draft_not_approvable", "current_status": current_status}
+
+    target_tg_id = _ccd_lookup_target_telegram_id(str(target_user_id)) if target_user_id else None
+    if not target_tg_id:
+        return {
+            "status": "error",
+            "error": "target_telegram_id_not_found",
+            "target_user_id": str(target_user_id) if target_user_id else None,
+        }
+
+    ok, send_err = await _ccd_send_outbound(to_child, target_tg_id, outbound_message)
+
+    if not ok:
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE cross_child_drafts SET status='failed', failure_reason=%s WHERE id=%s::uuid",
+                        (send_err, draft_id),
+                    )
+                    _ccd_safe_audit(
+                        cur,
+                        user_id=str(initiating_user_id),
+                        action_type="cross_child.outbound_failed",
+                        object_type="cross_child_draft",
+                        object_id=draft_id,
+                        recommendation_summary=None,
+                        human_decision="approved",
+                        execution_status="failed",
+                        error_message=send_err,
+                    )
+                    conn.commit()
+        except Exception as e:
+            print(f"[ccd] failure-path db error (non-fatal): {e}")
+        return {"status": "error", "error": send_err}
+
+    # Mark sent + audit in one transaction
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE cross_child_drafts
+                    SET status='sent', approved_at=NOW(), sent_at=NOW()
+                    WHERE id = %s::uuid
+                    RETURNING sent_at
+                    """,
+                    (draft_id,),
+                )
+                row = cur.fetchone()
+                sent_at = row[0] if row else None
+
+                _ccd_safe_audit(
+                    cur,
+                    user_id=str(initiating_user_id),
+                    action_type="cross_child.handoff_logged",
+                    object_type="cross_child_draft",
+                    object_id=draft_id,
+                    recommendation_summary=ai_to_ai_message[:500] if ai_to_ai_message else None,
+                    human_decision="approved",
+                    execution_status="success",
+                    error_message=None,
+                )
+                _ccd_safe_audit(
+                    cur,
+                    user_id=str(initiating_user_id),
+                    action_type="cross_child.outbound_sent",
+                    object_type="cross_child_draft",
+                    object_id=draft_id,
+                    recommendation_summary=outbound_message[:500] if outbound_message else None,
+                    human_decision="approved",
+                    execution_status="success",
+                    error_message=None,
+                )
+                conn.commit()
+    except Exception as e:
+        return {"status": "error", "error": f"db_update_failed: {e}"}
+
+    print(f"[ccd] approved + sent: id={draft_id} to_child={to_child} target_tg={target_tg_id}")
+
+    return {
+        "status": "sent",
+        "draft_id": draft_id,
+        "sent_at": str(sent_at),
+        "to_child": to_child,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# POST /sophia/edit-draft/{draft_id}
+# ─────────────────────────────────────────────────────────────────────
+@app.post("/sophia/edit-draft/{draft_id}")
+async def ccd_edit_draft(draft_id: str, req: EditDraftRequest):
+    if not req.ai_to_ai_message and not req.outbound_message:
+        return {"status": "error", "error": "no_changes_provided"}
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                fields = []
+                values = []
+                if req.ai_to_ai_message is not None:
+                    fields.append("ai_to_ai_message = %s")
+                    values.append(req.ai_to_ai_message)
+                if req.outbound_message is not None:
+                    fields.append("outbound_message = %s")
+                    values.append(req.outbound_message)
+                fields.append("status = 'edited'")
+                values.append(draft_id)
+
+                cur.execute(
+                    f"""
+                    UPDATE cross_child_drafts
+                    SET {", ".join(fields)}
+                    WHERE id = %s::uuid
+                    RETURNING id, status, initiating_user_id, ai_to_ai_message, outbound_message
+                    """,
+                    tuple(values),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return {"status": "error", "error": "draft_not_found"}
+                _, status, initiating_user_id, ai_to_ai_message, outbound_message = row
+
+                _ccd_safe_audit(
+                    cur,
+                    user_id=str(initiating_user_id),
+                    action_type="cross_child.draft_edited",
+                    object_type="cross_child_draft",
+                    object_id=draft_id,
+                    recommendation_summary=None,
+                    human_decision="edited",
+                    execution_status="success",
+                    error_message=None,
+                )
+                conn.commit()
+    except Exception as e:
+        return {"status": "error", "error": f"db_update_failed: {e}"}
+
+    print(f"[ccd] draft edited: id={draft_id}")
+
+    return {
+        "status": status,
+        "draft_id": draft_id,
+        "ai_to_ai_message": ai_to_ai_message,
+        "outbound_message": outbound_message,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
+# POST /sophia/skip-draft/{draft_id}
+# ─────────────────────────────────────────────────────────────────────
+@app.post("/sophia/skip-draft/{draft_id}")
+async def ccd_skip_draft(draft_id: str):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE cross_child_drafts
+                    SET status = 'skipped'
+                    WHERE id = %s::uuid AND status IN ('pending_approval', 'edited')
+                    RETURNING id, initiating_user_id
+                    """,
+                    (draft_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return {"status": "error", "error": "draft_not_found_or_not_skippable"}
+                _, initiating_user_id = row
+
+                _ccd_safe_audit(
+                    cur,
+                    user_id=str(initiating_user_id),
+                    action_type="cross_child.draft_skipped",
+                    object_type="cross_child_draft",
+                    object_id=draft_id,
+                    recommendation_summary=None,
+                    human_decision="skipped",
+                    execution_status="success",
+                    error_message=None,
+                )
+                conn.commit()
+    except Exception as e:
+        return {"status": "error", "error": f"db_update_failed: {e}"}
+
+    print(f"[ccd] draft skipped: id={draft_id}")
+
+    return {"status": "skipped", "draft_id": draft_id}
+
+# ═════════════════════════════════════════════════════════════════════
+# END CROSS-CHILD-DRAFT (CCD) endpoints
+# ═════════════════════════════════════════════════════════════════════
+

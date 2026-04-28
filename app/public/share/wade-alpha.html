@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<title>Wade — here's what's actually here</title>
+<style>
+  :root {
+    --bg: #0F1115;
+    --bg-elevated: #161922;
+    --text: #E8E4DC;
+    --text-muted: #9A958A;
+    --text-dim: #6B6760;
+    --accent: #C8975B;
+    --accent-dim: #8A6940;
+    --rule: #2A2D36;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", Roboto, sans-serif;
+    font-size: 18px;
+    line-height: 1.7;
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  .wrap {
+    max-width: 680px;
+    margin: 0 auto;
+    padding: 64px 28px 96px 28px;
+  }
+  .meta-top {
+    color: var(--text-dim);
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 32px;
+    font-weight: 500;
+  }
+  .meta-top .accent { color: var(--accent); }
+  h1 {
+    font-family: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    font-size: 40px;
+    line-height: 1.15;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    margin: 0 0 12px 0;
+    color: var(--text);
+  }
+  .subtitle {
+    color: var(--text-muted);
+    font-size: 17px;
+    font-style: italic;
+    margin-bottom: 56px;
+    padding-bottom: 32px;
+    border-bottom: 1px solid var(--rule);
+  }
+  h2 {
+    font-family: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    font-size: 26px;
+    line-height: 1.25;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    margin: 56px 0 20px 0;
+    color: var(--text);
+  }
+  h2 .num {
+    color: var(--accent);
+    font-size: 14px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    display: block;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-weight: 600;
+    font-style: normal;
+    margin-bottom: 8px;
+  }
+  p {
+    margin: 0 0 22px 0;
+    color: var(--text);
+  }
+  p.lead {
+    color: var(--text-muted);
+  }
+  strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+  em {
+    color: var(--accent);
+    font-style: normal;
+  }
+  .pullquote {
+    border-left: 2px solid var(--accent);
+    padding: 2px 0 2px 22px;
+    margin: 28px 0;
+    font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    font-size: 21px;
+    line-height: 1.5;
+    color: var(--text);
+    font-style: italic;
+  }
+  ul.facts {
+    list-style: none;
+    padding: 0;
+    margin: 24px 0;
+    border-top: 1px solid var(--rule);
+  }
+  ul.facts li {
+    padding: 18px 0;
+    border-bottom: 1px solid var(--rule);
+    color: var(--text);
+  }
+  ul.facts li strong {
+    color: var(--accent);
+    display: block;
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+    font-weight: 600;
+  }
+  .rule {
+    border: 0;
+    border-top: 1px solid var(--rule);
+    margin: 56px 0;
+  }
+  .timeline {
+    margin: 28px 0;
+    padding: 0;
+    list-style: none;
+  }
+  .timeline li {
+    display: flex;
+    gap: 24px;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .timeline li:last-child { border-bottom: 0; }
+  .timeline .when {
+    color: var(--accent);
+    font-weight: 600;
+    flex: 0 0 130px;
+    font-size: 15px;
+    letter-spacing: 0.02em;
+    padding-top: 2px;
+  }
+  .timeline .what {
+    flex: 1;
+    color: var(--text);
+  }
+  .links-row {
+    margin: 32px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .link-card {
+    display: block;
+    padding: 22px 24px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    text-decoration: none;
+    color: var(--text);
+    transition: border-color 0.2s ease, transform 0.2s ease;
+  }
+  .link-card:hover, .link-card:focus {
+    border-color: var(--accent);
+    transform: translateY(-1px);
+  }
+  .link-card .label {
+    color: var(--accent);
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .link-card .title {
+    font-family: "Iowan Old Style", Georgia, serif;
+    font-size: 19px;
+    line-height: 1.35;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .link-card .url {
+    color: var(--text-dim);
+    font-size: 13px;
+    word-break: break-all;
+  }
+  .signoff {
+    margin-top: 56px;
+    padding-top: 32px;
+    border-top: 1px solid var(--rule);
+    color: var(--text-muted);
+    font-style: italic;
+  }
+  .signoff .name {
+    color: var(--accent);
+    font-style: normal;
+    font-weight: 600;
+    margin-top: 12px;
+    display: block;
+    font-size: 17px;
+  }
+  .footer {
+    margin-top: 80px;
+    padding-top: 24px;
+    border-top: 1px solid var(--rule);
+    color: var(--text-dim);
+    font-size: 12px;
+    letter-spacing: 0.05em;
+    text-align: center;
+  }
+  @media (max-width: 520px) {
+    body { font-size: 17px; }
+    .wrap { padding: 40px 22px 72px 22px; }
+    h1 { font-size: 32px; }
+    h2 { font-size: 22px; }
+    .pullquote { font-size: 18px; padding-left: 18px; }
+    .timeline li { flex-direction: column; gap: 4px; }
+    .timeline .when { flex: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="meta-top">A letter from <span class="accent">Iosif Skorohodov</span> &nbsp;·&nbsp; April 28, 2026</div>
+
+  <h1>Wade — here's what's actually here.</h1>
+  <div class="subtitle">The full picture, the way I see it.</div>
+
+  <h2><span class="num">I.</span>Wade</h2>
+
+  <p>Wade,</p>
+
+  <p>I owe you a real update. I overslept this morning, you already knew that, and I owe you better than a five-minute phone call. So I'm sitting down to do this properly.</p>
+
+  <p>You and me have a bond. You showed up for me when I was inside, when most people didn't. I don't take that lightly, and I'm not going to pretend it's not part of why I'm writing this to you the way I am.</p>
+
+  <p>I'm going to show you what I'm actually building. Not a pitch, not a sales angle &mdash; the real picture. Because if you're going to be in it with me, you should see it the way I see it. Not 60 percent of it. All of it.</p>
+
+  <p>Take your time with this. Read it on the toilet, read it before bed, read it twice. There's no rush. The picture's the point.</p>
+
+  <h2><span class="num">II.</span>What SKOpi actually is (in plain English)</h2>
+
+  <p>The simplest way to say it: <strong>SKOpi is a company building tools that let regular people do what only big real estate firms and Wall Street insiders used to be able to do.</strong></p>
+
+  <p>For a long time, if you wanted to put money into a real estate development &mdash; a piece of raw land, a subdivision, a build-out &mdash; you either had to be rich enough to buy the whole thing yourself, or you had to know somebody who'd let you into a private deal. The system was rigged so the same fifty firms saw every opportunity first, and everyone else got the leftovers years later when the real money was already made.</p>
+
+  <p>We're flipping that. The Reindeer property is the first deal we're using these tools on, and you're already in it with me. But Reindeer is one piece. SKOpi is the whole platform underneath.</p>
+
+  <p>There are a few moving parts and I want to walk you through each one plainly:</p>
+
+  <p><strong>A way to raise money for projects without going to banks.</strong> This involves something called crypto tokens. Don't let that word scare you off &mdash; think of tokens like shares of stock, except instead of being only available to people with brokerage accounts and lawyers, anyone with a phone can buy them. Same idea as stock &mdash; you put money in, you own a piece of the project, you share in the profits when it works. Just without the middlemen taking their cut on every transaction.</p>
+
+  <p><strong>A platform for understanding land at a level nobody else has.</strong> That's TERRA. I'll spend the next section on this because it matters more than people realize.</p>
+
+  <p><strong>Our own document tools, our own email, our own communications.</strong> We don't run on Google or Microsoft. Everything we do sits on hardware we control. There's a reason for this &mdash; I'll get to it.</p>
+
+  <p><strong>A real company structure underneath all of it.</strong> Delaware C-corp, board of directors, governance documents, the whole thing. This isn't a kitchen-table operation pretending to be a company. It's a company.</p>
+
+  <p>Every layer is owned by us instead of rented from somebody else. <em>That's the difference between SKOpi and most companies that try to do something like this.</em></p>
+
+  <h2><span class="num">III.</span>Why I built our own land intelligence layer (this is TERRA)</h2>
+
+  <p>Here's the part most people don't get, and the part I want you to understand most.</p>
+
+  <p>When somebody wants to look at a property &mdash; figure out what it's worth, what it can be developed into, who owns it, what's wrong with it &mdash; they pull it up on Zillow or Redfin. Maybe their agent has access to the MLS. Those tools tell you the basics: square footage, last sale price, sometimes a guess at the value.</p>
+
+  <p>That's surface information. <strong>For real land deals, surface isn't enough.</strong></p>
+
+  <p>When you're actually deciding whether to buy a piece of land &mdash; like the Reindeer property &mdash; you need to know: who's owned it for the last fifty years and at what prices, what permits have ever been pulled on it, whether there are easements running through it that nobody talks about, what the county valuation has been doing year over year, whether there are utility lines crossing it, what the zoning actually allows you to build, and a dozen other things that take a research analyst days to dig up one parcel at a time.</p>
+
+  <p>The big private equity land funds &mdash; the firms with billions of dollars &mdash; they have whole internal teams that do nothing but this kind of digging. They built their own systems. Small companies just don't have that. Small companies make do with Zillow and a lot of phone calls.</p>
+
+  <div class="pullquote">We built ours.</div>
+
+  <p>I want you to understand what I just said. We built our own land intelligence platform. Me, working on this, with the AI tools we've put together. Right now today, on my phone, I can drop a pin anywhere in Deschutes County, Oregon &mdash; anywhere, on any piece of land &mdash; and in seconds I get back the parcel boundaries, the owner of record, the full permit history, every sale that's ever been recorded on that parcel and at what price, the year-over-year valuation trend from the county, and any development documents on file. <strong>One hundred and six thousand parcels indexed.</strong> Every piece of land in the entire county, ready to query in under a second.</p>
+
+  <p>I'll give you a real example. The Reindeer property &mdash; the one you and I are buying &mdash; when I ran it through TERRA, the system pulled up the full sales chain on it. It caught that the property transferred from <strong>Lennar</strong> (the big national homebuilder) to <strong>Knox Investments</strong> (the LLC we're now buying it from) in December of 2024. That kind of information takes a research analyst hours to dig up. We get it in a tap.</p>
+
+  <p>Next week, the deeds and historical easement layer comes online &mdash; every recorded document on Deschutes parcels going back to <strong>1871</strong>. After that, the same system extends to every county we want. Crook County, Jefferson County, Klamath County, eventually the whole state and beyond.</p>
+
+  <p>Here's what that means: <em>by the time most other small real estate companies even realize they need this kind of platform, we'll be eighteen to twenty-four months ahead of them.</em> The work we're doing right now is work nobody else is doing.</p>
+
+  <div class="pullquote">When I get to a property, Wade, I see things on my phone in thirty seconds that other land buyers spend a week of phone calls trying to figure out. That's the difference. That's TERRA.</div>
+
+  <h2><span class="num">IV.</span>Why I'm not building this on top of someone else's stack</h2>
+
+  <p>I want to talk to you about something you'll appreciate.</p>
+
+  <p>The way most companies work today &mdash; even most of the companies that look successful from the outside &mdash; is they're paying rent to somebody else. They use Google for email, Microsoft for documents, Amazon for servers, Stripe for payments, Mailchimp for newsletters, Zillow for property data. Every single one of those is a bill they pay every month, <em>and</em> every single one of those companies can shut them off, throttle them, change the terms, raise the price, or quietly hand their data to a competitor. It happens all the time.</p>
+
+  <p><strong>I refuse to build SKOpi that way.</strong></p>
+
+  <p>Our servers are ours. Our AI runs on hardware we control. Our document tools &mdash; we use a system called SVOIcloud, which is our own setup, sitting on our own equipment, that does what Google Docs does but without Google watching every word we write. Our land intelligence layer is ours. Our communications stack is ours.</p>
+
+  <p>It costs more upfront. It's harder to set up. It's slower at the start. <em>And it pays back forever, because nobody owns the rails underneath us.</em> Nobody can shut SKOpi off because nobody else holds the keys.</p>
+
+  <p>This is also part of why we use crypto tokens for raising money instead of going to banks. Banks have rules about who they'll lend to and what they'll lend to. They take a cut on every transaction. They can decline you, freeze your account, force you through their system. Tokens let SKOpi raise capital from regular people who want in, without asking permission from a bank or Wall Street. The people who put money in own a piece of the deal directly. <strong>No middleman, no permission slip.</strong></p>
+
+  <p>That's not speculation. That's how rich people have invested in real estate forever. We're just opening that door to everyone else.</p>
+
+  <h2><span class="num">V.</span>What's already running today</h2>
+
+  <p>I want to be specific about what exists right now versus what's a plan. This is a list of things that are running this minute, on April 28, 2026:</p>
+
+  <ul class="facts">
+    <li>
+      <strong>The Reindeer property is under contract.</strong>
+      Three thousand dollars of earnest money is at Deschutes Title. Closing is set for July 6.
+    </li>
+    <li>
+      <strong>TERRA is live.</strong>
+      All 106,000 Deschutes County parcels indexed. The platform answers in milliseconds.
+    </li>
+    <li>
+      <strong>Three AI assistants are running on our own servers.</strong>
+      Sophia, Ophelia, and Hypatia. They're not toys. About an hour before I sat down to write this, Sophia drafted a project update message, handed it to Ophelia (Dan's assistant), and Ophelia delivered it to Dan automatically. That happened today, in production, with me as the human in the loop approving the send. AI-to-AI coordination working in real life, on a real project, for a real partner.
+    </li>
+    <li>
+      <strong>SVOIcloud is running.</strong>
+      Our own document and email infrastructure, on hardware we own.
+    </li>
+    <li>
+      <strong>Token infrastructure deployed and verified.</strong>
+      Live on Solana mainnet, one of the major crypto networks.
+    </li>
+    <li>
+      <strong>The company itself is real.</strong>
+      Delaware C-corporation. Board. Governance documents. A constitution that locks in certain principles permanently &mdash; meaning even I can't change them later. There's a reason for that, but that's a longer conversation.
+    </li>
+  </ul>
+
+  <p><em>This isn't a deck describing what we're going to do. This is a list of what's running.</em></p>
+
+  <h2><span class="num">VI.</span>Where this goes</h2>
+
+  <p>Here's the timeline, plainly:</p>
+
+  <ol class="timeline">
+    <li>
+      <span class="when">May 11, 2026</span>
+      <span class="what">Pre-launch begins. We start onboarding the first wave of people who'll put money into SKOpi.</span>
+    </li>
+    <li>
+      <span class="when">May 30</span>
+      <span class="what">Target: $100,000 in revenue.</span>
+    </li>
+    <li>
+      <span class="when">June 30</span>
+      <span class="what">Target: $600,000 to $700,000 in revenue.</span>
+    </li>
+    <li>
+      <span class="when">July 6</span>
+      <span class="what">Reindeer closes. Stretch goal: fund the entire $97,000 down payment from the raise instead of out of our own pockets. If we hit it, that's the proof point &mdash; we showed we can raise the capital for a real deal from regular people, the way SKOpi is designed to do.</span>
+    </li>
+  </ol>
+
+  <p><strong>That's two months from now.</strong></p>
+
+  <p>I'm telling you all of this because you're already in The Sko Pine Group with me. You're already in Reindeer. You showed up for me at a time when most people didn't, and the time has come for me to show up for you with the truth about what's actually here.</p>
+
+  <p>Reindeer is the first deal. It's not the only thing. <em>SKOpi is bigger than I think you currently see</em>, and I want you to see it before you decide what role you want to play in it. I'm not asking you for anything in this letter. I'm asking you to read it, look at the links below if you want more, and bring whatever questions you have to Thursday.</p>
+
+  <p>You're a builder by trade. You know what real work looks like and what fake work looks like. <strong>I'm trusting you to look at this and tell me what you see.</strong></p>
+
+  <h2><span class="num">VII.</span>If you want to go deeper</h2>
+
+  <p>Two more things to read, if you want the full picture:</p>
+
+  <div class="links-row">
+    <a class="link-card" href="https://gamma.app/docs/SKOpi-Project-Alpha-yqk7wnefhjq0vw0" target="_blank" rel="noopener">
+      <div class="label">The visual breakdown</div>
+      <div class="title">SKOpi Project Alpha &mdash; the deck</div>
+      <div class="url">gamma.app/docs/SKOpi-Project-Alpha-yqk7wnefhjq0vw0</div>
+    </a>
+    <a class="link-card" href="https://gamma.app/docs/Why-I-Am-Doing-What-I-Am-Doing-sclhjfxxqimemtd" target="_blank" rel="noopener">
+      <div class="label">The longer essay</div>
+      <div class="title">Why I am doing what I am doing</div>
+      <div class="url">gamma.app/docs/Why-I-Am-Doing-What-I-Am-Doing-sclhjfxxqimemtd</div>
+    </a>
+  </div>
+
+  <p>Read either, both, or neither. The page you're on right now has the core of it.</p>
+
+  <h2><span class="num">VIII.</span>Closing</h2>
+
+  <p>Read this when you have time. Bring questions to Thursday at the property.</p>
+
+  <p>Whatever you want to ask, no question is too basic, no question is wrong. <strong>I'd rather you understand 100 percent of what we're doing than nod along to something you only see 60 percent of.</strong></p>
+
+  <p>The whole reason I'm writing this to you is because I want you to be able to look at SKOpi and either say <em>"yes, I see it, I'm in deeper"</em> or <em>"this isn't for me, but I'm glad I saw it clearly."</em> Either answer is the right answer. Half-knowing isn't.</p>
+
+  <div class="signoff">
+    See you Thursday. Drive safe.
+    <span class="name">— Iosif</span>
+  </div>
+
+  <div class="footer">
+    SKOpi Global Holdings, Inc. &nbsp;·&nbsp; A letter to Wade Pine &nbsp;·&nbsp; April 28, 2026
+  </div>
+
+</div>
+</body>
+</html>
