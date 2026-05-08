@@ -13,6 +13,7 @@ import psycopg
 import httpx
 from anthropic import Anthropic
 from biography import handle_biography_message, handle_biography_callback, router as biography_router
+from yakov import router as yakov_router
 from blocklist_guard import check_blocklist_and_archive
 # === E2 Step 2b: per-file child imports retired 2026-04-28 ===
 # Children now load from child_personas DB rows via child_engine.ask_child().
@@ -44,6 +45,7 @@ def is_fred(telegram_id: str) -> bool:
 
 app = FastAPI(title="Nevsky API", version="0.1.0")
 app.include_router(biography_router)
+app.include_router(yakov_router)
 
 # ── Static file hosting for /share/* (public-readable HTML pages) ───
 from fastapi.staticfiles import StaticFiles
