@@ -607,3 +607,106 @@ def fetch_dial_valuation(taxlot: str, force_refresh: bool = False) -> dict:
 def fetch_dial_dev_docs(taxlot: str, force_refresh: bool = False) -> dict:
     """Development documents on file: easements, planning files, recorded encumbrances."""
     return _dial_fetch_section(taxlot, "DevelopmentDocs", force_refresh)
+
+
+# =============================================================================
+# YAKOV OMNISCIENCE — handoff and commit queries (DOCTRINE-NEVSKY-OMNISCIENCE-01)
+# =============================================================================
+
+def query_yakov_handoffs(
+    hours_back: int | None = None,
+    instance: str | None = None,
+    only_high_impact: bool = False,
+    only_with_tags: list[str] | None = None,
+    limit: int = 10,
+) -> list[dict]:
+    """
+    Pull recent Yakov session handoffs from knowledge_store.
+
+    Use cases:
+        - "what did Yakov do today?" -> hours_back=24
+        - "show me the last high-impact session" -> only_high_impact=True, limit=1
+        - "what did terminal Yakov do this week?" -> hours_back=168, instance="yakov-droplet"
+    """
+    where = ["'yakov' = ANY(tags)", "'handoff' = ANY(tags)"]
+    params: list = []
+
+    if hours_back is not None and hours_back > 0:
+        where.append("created_at >= NOW() - (%s || ' hours')::interval")
+        params.append(str(hours_back))
+
+    if instance:
+        where.append("(metadata->>'instance' = %s OR %s = ANY(tags))")
+        params.append(instance)
+        params.append(f"instance:{instance}")
+
+    if only_high_impact:
+        where.append("'high_impact' = ANY(tags)")
+
+    if only_with_tags:
+        where.append("tags @> %s")
+        params.append(list(only_with_tags))
+
+    sql = f"""
+        SELECT id, title, tags, created_at,
+               metadata->>'instance' AS instance,
+               metadata->>'summary' AS summary,
+               metadata->'changes' AS changes,
+               metadata->'commit_hashes' AS commit_hashes,
+               metadata->'next_priorities' AS next_priorities,
+               metadata->'doctrine_notes' AS doctrine_notes,
+               (metadata->>'high_impact')::boolean AS high_impact
+        FROM knowledge_store
+        WHERE {" AND ".join(where)}
+        ORDER BY created_at DESC
+        LIMIT %s
+    """
+    params.append(limit)
+
+    try:
+        with _conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        logger.error("query_yakov_handoffs error: %s", e)
+        return []
+
+
+def query_yakov_commits(hours_back: int | None = None, limit: int = 20) -> list[dict]:
+    """
+    Pull recent git commits ingested by the post-commit hook.
+
+    Use cases:
+        - "what did Yakov ship today?" -> hours_back=24
+        - "show me the last 5 commits" -> limit=5
+    """
+    where = ["'yakov' = ANY(tags)", "'git_commit' = ANY(tags)"]
+    params: list = []
+
+    if hours_back is not None and hours_back > 0:
+        where.append("created_at >= NOW() - (%s || ' hours')::interval")
+        params.append(str(hours_back))
+
+    sql = f"""
+        SELECT id, title, created_at,
+               metadata->>'commit_hash' AS commit_hash,
+               metadata->>'author' AS author,
+               metadata->>'subject' AS subject,
+               metadata->>'branch' AS branch,
+               metadata->'files_changed' AS files_changed
+        FROM knowledge_store
+        WHERE {" AND ".join(where)}
+        ORDER BY created_at DESC
+        LIMIT %s
+    """
+    params.append(limit)
+
+    try:
+        with _conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        logger.error("query_yakov_commits error: %s", e)
+        return []

@@ -148,7 +148,7 @@ def _build_handoff_markdown(req: HandoffRequest, ts_iso: str) -> str:
 
 
 @router.post("/yakov/handoff")
-def post_handoff(req: HandoffRequest):
+async def post_handoff(req: HandoffRequest):
     now = datetime.now(timezone.utc)
     ts_iso = now.isoformat()
     title = f"Yakov Handoff — {now.strftime('%Y-%m-%d %H:%M UTC')}"
@@ -202,7 +202,41 @@ def post_handoff(req: HandoffRequest):
         logger.error(f"yakov handoff insert failed: {e}")
         raise HTTPException(status_code=500, detail=f"insert failed: {e}")
 
-    # TODO: Telegram notification on high_impact handoffs.
+    notification_sent = False
+    notification_error: Optional[str] = None
+    if req.high_impact:
+        try:
+            from main import send_sophia_message
+
+            with _conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT bound_telegram_id FROM child_personas "
+                        "WHERE canonical_name = 'sophia' "
+                        "AND decommissioned_at IS NULL "
+                        "AND bound_telegram_id IS NOT NULL"
+                    )
+                    row = cur.fetchone()
+
+            if row and row[0]:
+                chat_id = int(row[0])
+                msg_lines = [
+                    f"⚡ *High-impact handoff* — Yakov ({req.instance})",
+                    "",
+                    req.summary.strip(),
+                ]
+                if req.next_priorities:
+                    msg_lines += ["", "*Next:*"]
+                    msg_lines += [f"• {p}" for p in req.next_priorities[:5]]
+                msg_lines += ["", f"_id: {new_id}_"]
+                await send_sophia_message(chat_id, "\n".join(msg_lines))
+                notification_sent = True
+            else:
+                notification_error = "no bound_telegram_id for sophia"
+        except Exception as e:
+            logger.warning(f"yakov handoff Telegram notify failed: {e}")
+            notification_error = str(e)
+
     return {
         "ok": True,
         "id": str(new_id),
@@ -210,7 +244,8 @@ def post_handoff(req: HandoffRequest):
         "title": title,
         "tags": tags,
         "high_impact": req.high_impact,
-        "notification_sent": False,
+        "notification_sent": notification_sent,
+        "notification_error": notification_error,
     }
 
 

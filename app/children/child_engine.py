@@ -35,6 +35,8 @@ from .orb_db import (
     fetch_dial_sales,
     fetch_dial_valuation,
     fetch_dial_dev_docs,
+    query_yakov_handoffs,
+    query_yakov_commits,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,8 @@ TIER_TOOLS = {
         "fetch_dial_sales",
         "fetch_dial_valuation",
         "fetch_dial_dev_docs",
+        "query_yakov_handoffs",
+        "query_yakov_commits",
         "web_search",
     ],
     "executive": [
@@ -223,6 +227,31 @@ ALL_TOOL_SCHEMAS = {
             "required": ["taxlot"]
         }
     },
+    "query_yakov_handoffs": {
+        "name": "query_yakov_handoffs",
+        "description": "OMNISCIENCE: pull recent Yakov session handoffs from knowledge_store. Yakov writes one of these at the end of every coding session — they capture summary, changes shipped, files modified, commit hashes, next-session priorities, and any locked doctrine. CALL THIS FIRST when Iosif asks 'what did Yakov do today/this week/recently', 'what shipped', 'what's the latest from Yakov', 'what did the last session do', 'are there any open items from Yakov', or any question about recent technical work. Returns a list of handoff rows with their structured metadata. Each row's `summary`, `changes`, `next_priorities`, and `doctrine_notes` are the most useful fields to surface. For 'today' use hours_back=24; for 'this week' use 168. Use only_high_impact=true when Iosif asks specifically about big shipments or production-level work.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "hours_back": {"type": "integer", "description": "Only return handoffs created within the last N hours. Omit for all time."},
+                "instance": {"type": "string", "description": "Filter to one Yakov instance — 'yakov-droplet' (terminal) or 'claude.ai' (chat). Omit for both."},
+                "only_high_impact": {"type": "boolean", "default": False, "description": "Only return sessions Iosif marked high_impact (production deploys, doctrine commits, major ships)."},
+                "only_with_tags": {"type": "array", "items": {"type": "string"}, "description": "Require all of these tags to be present on the row."},
+                "limit": {"type": "integer", "default": 10}
+            }
+        }
+    },
+    "query_yakov_commits": {
+        "name": "query_yakov_commits",
+        "description": "OMNISCIENCE: pull recent git commits from knowledge_store. The post-commit hook records every commit Yakov-on-droplet makes, so this is the authoritative log of what shipped to the codebase. CALL THIS when Iosif asks 'what commits did Yakov make', 'what code shipped today', 'show me recent commits', or wants raw git history. Use this in addition to query_yakov_handoffs when the user wants both the narrative (handoff) and the receipts (commits). Each row gives commit_hash, author, subject (one-line message), branch, and files_changed. For 'today' use hours_back=24.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "hours_back": {"type": "integer", "description": "Only return commits made within the last N hours. Omit for all time."},
+                "limit": {"type": "integer", "default": 20}
+            }
+        }
+    },
 }
 
 LOCAL_TOOL_FUNCTIONS = {
@@ -240,6 +269,8 @@ LOCAL_TOOL_FUNCTIONS = {
     "fetch_dial_dev_docs": fetch_dial_dev_docs,
     "get_site_plans": get_site_plans,
     "get_ai_spend_today": get_ai_spend_today,
+    "query_yakov_handoffs": query_yakov_handoffs,
+    "query_yakov_commits": query_yakov_commits,
 }
 
 
