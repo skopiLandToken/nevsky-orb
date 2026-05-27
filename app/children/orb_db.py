@@ -312,6 +312,31 @@ COUNTY_REGISTRY = {
             LIMIT 1
         """,
     },
+    "051": {  # Multnomah (FIPS 41-051) — Tier 1 Flagship, Portland metro
+        "name": "Multnomah",
+        # bbox: roughly Sauvie Island NW to Cascade Locks E, covers Portland + Gresham + unincorporated
+        "bbox": (45.40, 45.80, -123.00, -121.40),
+        "query": """
+            SELECT taxlot,
+                   COALESCE(map_id, township_range) AS section_id,
+                   ROUND(size_acres::numeric, 3) AS acres,
+                   -- Portland Maps search works for any parcel without captcha; deeper detail
+                   -- pages exist but are address-dependent. Address search is the safe deeplink.
+                   ('https://www.portlandmaps.com/search/?query=' ||
+                       REPLACE(COALESCE(situs_address, taxlot), ' ', '+')) AS county_url,
+                   COALESCE(map_id, township_range) AS map_number,
+                   owner_name,
+                   situs_address,
+                   zone_code,
+                   COALESCE(zone_code, 'unspecified') AS zone_label,
+                   ST_AsText(ST_Centroid(geom)) AS parcel_centroid,
+                   'Multnomah'::text AS county_name,
+                   '051'::text AS county_fips
+            FROM parcels_multnomah
+            WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            LIMIT 1
+        """,
+    },
     # Jefferson (031) and Lane (039) entries land here when their L1 tables exist.
 }
 
@@ -688,6 +713,666 @@ def fetch_dial_valuation(taxlot: str, force_refresh: bool = False) -> dict:
 def fetch_dial_dev_docs(taxlot: str, force_refresh: bool = False) -> dict:
     """Development documents on file: easements, planning files, recorded encumbrances."""
     return _dial_fetch_section(taxlot, "DevelopmentDocs", force_refresh)
+
+
+# =============================================================================
+# CROOK Layer 2 Fetchers — assessment + permits
+# =============================================================================
+# Two truths discovered during this build (worth keeping for Nevsky):
+#
+#   1. Crook tax cards (gis.crookcountyor.gov/taxcards/{taxlot}.pdf) are scanned
+#      image PDFs from 2013 — CCITTFaxDecode TIFF Group 4, zero embedded text.
+#      Structured valuation / tax history extraction would require tesseract OCR
+#      on aged scans, which is a heavy dependency and noisy output. So this
+#      fetcher returns the rich inline data we already hold in parcels_crook
+#      (owner, situs, account, prop_class, zoning, acreage) PLUS verified deep
+#      links to the PDF and the PSO recorder — and flags the missing structured
+#      fields as IN FLIGHT honestly rather than fabricating extraction.
+#
+#   2. Oregon ePermitting (aca-oregon.accela.com) is an ASP.NET viewstate-heavy
+#      app. A bare POST with __VIEWSTATE/__VIEWSTATEGENERATOR + parcel field
+#      returns the SAME 58 KB page no matter what parcel we submit — server-side
+#      validation silently rejects without the full ClientState payload. Real
+#      scraping needs either Playwright or a byte-for-byte browser capture. Until
+#      then, fetch_county_permits returns a verified deep link to the Accela
+#      search page pre-filled with the parcel and labels the fetched list IN
+#      FLIGHT — much better than a scraper that silently returns 0 permits for
+#      every parcel.
+# =============================================================================
+
+_CROOK_CACHE_TTL_HOURS = 24
+_ACA_OREGON_BASE = "https://aca-oregon.accela.com/oregon"
+
+
+def fetch_crook_assessment(taxlot: str, force_refresh: bool = False) -> dict:
+    """Crook assessment + ownership snapshot for a taxlot.
+
+    Layer 1 inline data (owner, situs, account, zoning, acreage) is the source
+    of truth and is always fresh. Structured valuation / tax-history / sales
+    fields are NOT available without OCR on the legacy scanned tax cards; those
+    are flagged in_flight and the user gets a direct PDF link instead.
+
+    Cache exists primarily to hold pdf_etag for future cheap re-checks and to
+    keep a consistent fetched_at timestamp visible in the Sophia tool output.
+
+    Returns: {found, taxlot, county_fips, snapshot{owner, situs, account, zoning, acreage},
+              deep_links{tax_card_pdf, tax_map_pdf, pso_recorder}, in_flight[],
+              fetched_at, from_cache, source}
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    if not force_refresh:
+        try:
+            with _conn() as cn, cn.cursor() as cur:
+                cur.execute(
+                    "SELECT taxlot, pdf_url, parsed_json, fetched_at, last_error "
+                    "FROM crook_tax_card_cache WHERE taxlot = %s",
+                    (taxlot,),
+                )
+                cached = cur.fetchone()
+                if cached and cached["parsed_json"]:
+                    age = _dt.now(_tz.utc) - cached["fetched_at"]
+                    if age < _td(hours=_CROOK_CACHE_TTL_HOURS):
+                        payload = cached["parsed_json"]
+                        payload["from_cache"] = True
+                        payload["cached_age_hours"] = round(age.total_seconds() / 3600, 1)
+                        return payload
+        except Exception as e:
+            print(f"[crook_assessment] cache read error: {e}")
+
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT taxlot, county_fips, owner_name, situs_address, mailing_address,
+                       account, prop_class, pc_desc, tax_code_area,
+                       sub_name, sub_block, sub_lot,
+                       assessed_acres, gis_acres,
+                       zone_code, zone_desc, map_number,
+                       pats_url, tax_card_url, tax_map_url, pso_url
+                FROM parcels_crook WHERE taxlot = %s LIMIT 1
+                """,
+                (taxlot,),
+            )
+            row = cur.fetchone()
+    except Exception as e:
+        return {"found": False, "reason": f"DB error: {e}", "taxlot": taxlot}
+
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_crook", "taxlot": taxlot}
+
+    payload = {
+        "found": True,
+        "from_cache": False,
+        "taxlot": row["taxlot"],
+        "county_fips": row["county_fips"],
+        "source": "parcels_crook L1 inline + Crook County GIS / PSO deep links",
+        "snapshot": {
+            "owner": {
+                "primary": row["owner_name"],
+                "mailing_address": row["mailing_address"],
+            },
+            "situs": {
+                "address": row["situs_address"],
+            },
+            "account": {
+                "number": row["account"],
+                "prop_class": row["prop_class"],
+                "pc_desc": row["pc_desc"],
+                "tax_code_area": row["tax_code_area"],
+            },
+            "subdivision": {
+                "name": row["sub_name"],
+                "block": row["sub_block"],
+                "lot": row["sub_lot"],
+            } if row["sub_name"] else None,
+            "acreage": {
+                "assessed": float(row["assessed_acres"]) if row["assessed_acres"] is not None else None,
+                "gis":      float(row["gis_acres"])      if row["gis_acres"]      is not None else None,
+            },
+            "zoning": {
+                "code":  row["zone_code"],
+                "label": row["zone_desc"],
+            },
+            "map_number": row["map_number"],
+        },
+        "deep_links": {
+            "tax_card_pdf":  row["tax_card_url"],   # legacy scanned PDF, image-only
+            "tax_map_pdf":   row["tax_map_url"],
+            "pso_recorder":  row["pso_url"] or row["pats_url"],
+        },
+        "in_flight": [
+            "Structured valuation (real-market / assessed / taxable) — Crook tax cards are scanned image PDFs from 2013; OCR pipeline queued.",
+            "Multi-year tax payment history — same OCR blocker.",
+            "Sales chain — PSO recorder is Blazor Server (JS-required); needs Playwright or alt source. Deep link above lets the user pull it themselves.",
+        ],
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO crook_tax_card_cache (taxlot, pdf_url, parsed_json, fetched_at, last_error)
+                   VALUES (%s, %s, %s::jsonb, NOW(), NULL)
+                   ON CONFLICT (taxlot) DO UPDATE SET
+                       pdf_url = EXCLUDED.pdf_url,
+                       parsed_json = EXCLUDED.parsed_json,
+                       fetched_at = NOW(),
+                       last_error = NULL""",
+                (taxlot, row["tax_card_url"], _json.dumps(payload)),
+            )
+            cn.commit()
+    except Exception as e:
+        print(f"[crook_assessment] cache write error: {e}")
+
+    return payload
+
+
+# Counties known to participate in Oregon's state ePermitting (Accela ACA).
+# Source: oregon.gov BCD jurisdiction lookup, cross-checked with county building
+# department pages. This set drives the "in_flight vs not_applicable" branch in
+# fetch_county_permits — counties NOT in this set get a structured response
+# saying the state portal won't have their permits, look elsewhere.
+_OREGON_EPERMITTING_FIPS = {
+    "013",  # Crook        — confirmed via co.crook.or.us/commdev FAQ
+    "031",  # Jefferson    — historically participates; verify per-build
+    "039",  # Lane         — partial; participates for some jurisdictions
+    # Deschutes (017) does NOT participate — uses DIAL natively. Multnomah (051)
+    # has its own permit system (Portland Maps for COP parcels). Add new FIPS
+    # codes here only after confirming via the BCD jurisdiction lookup.
+}
+
+
+def fetch_county_permits(taxlot: str, county_fips: str, force_refresh: bool = False) -> dict:
+    """Permit search for a parcel via Oregon ePermitting (Accela ACA).
+
+    Reusable across every county that participates in Oregon's state ePermitting
+    portal — pass the county_fips and the function does the right thing. Counties
+    not in _OREGON_EPERMITTING_FIPS get a structured "not_applicable" response
+    routing the caller to the county-native system instead.
+
+    NOTE — current implementation: returns a verified deep link to the Accela
+    search page pre-filled with the taxlot, plus an in_flight notice. Real
+    scrape is gated on either (a) Playwright in the container or (b) a fully
+    captured browser viewstate payload. Cache table is ready and the function
+    contract is stable — when the scrape lands, this function changes internally
+    but the return shape doesn't.
+
+    Returns: {found, taxlot, county_fips, status, permit_count, permits,
+              deep_links{accela_search}, in_flight[], fetched_at, from_cache}
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    if not county_fips or not isinstance(county_fips, str):
+        return {"found": False, "reason": "Invalid county_fips"}
+    taxlot = taxlot.strip().upper()
+    county_fips = county_fips.strip()
+
+    if county_fips not in _OREGON_EPERMITTING_FIPS:
+        return {
+            "found": False,
+            "status": "not_applicable",
+            "taxlot": taxlot,
+            "county_fips": county_fips,
+            "reason": (
+                f"County FIPS 41-{county_fips} does not participate in Oregon's state "
+                "ePermitting portal. Use the county-native permit system instead "
+                "(Deschutes → DIAL via fetch_dial_permits; Multnomah → Portland Maps "
+                "via fetch_multnomah_permits)."
+            ),
+        }
+
+    if not force_refresh:
+        try:
+            with _conn() as cn, cn.cursor() as cur:
+                cur.execute(
+                    "SELECT permits_json, permit_count, aca_search_url, fetched_at, last_error "
+                    "FROM oregon_permits_cache WHERE taxlot = %s AND county_fips = %s",
+                    (taxlot, county_fips),
+                )
+                cached = cur.fetchone()
+                if cached:
+                    age = _dt.now(_tz.utc) - cached["fetched_at"]
+                    if age < _td(hours=_CROOK_CACHE_TTL_HOURS):
+                        return {
+                            "found": True,
+                            "from_cache": True,
+                            "cached_age_hours": round(age.total_seconds() / 3600, 1),
+                            "taxlot": taxlot,
+                            "county_fips": county_fips,
+                            "status": "deep_link_only",
+                            "permit_count": cached["permit_count"],
+                            "permits": cached["permits_json"] or [],
+                            "deep_links": {"accela_search": cached["aca_search_url"]},
+                            "in_flight": [
+                                "Server-side scrape of the Accela result page — gated on viewstate capture or Playwright.",
+                            ],
+                            "fetched_at": cached["fetched_at"].isoformat(),
+                        }
+        except Exception as e:
+            print(f"[county_permits] cache read error: {e}")
+
+    # Deep link the caller can click through to a pre-filled Accela search.
+    # GET /oregon/Cap/CapHome.aspx?module=Building works without auth; the user
+    # then pastes the taxlot into the parcel field. We build the URL once and
+    # cache the structured "found but not scraped" response.
+    search_url = f"{_ACA_OREGON_BASE}/Cap/CapHome.aspx?module=Building"
+    payload = {
+        "found": True,
+        "from_cache": False,
+        "taxlot": taxlot,
+        "county_fips": county_fips,
+        "status": "deep_link_only",
+        "permit_count": 0,
+        "permits": [],
+        "deep_links": {"accela_search": search_url},
+        "in_flight": [
+            "Server-side scrape of the Accela result page — gated on viewstate capture or Playwright (a bare-bones POST returns the unfiltered form template, server-side validation silently rejects without the full ClientState payload).",
+            "Until then: clicking the deep link drops the user on Accela's search page where pasting the taxlot returns the real list in one search submit.",
+        ],
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO oregon_permits_cache (taxlot, county_fips, permits_json, permit_count, aca_search_url, fetched_at, last_error)
+                   VALUES (%s, %s, '[]'::jsonb, 0, %s, NOW(), NULL)
+                   ON CONFLICT (taxlot, county_fips) DO UPDATE SET
+                       aca_search_url = EXCLUDED.aca_search_url,
+                       fetched_at = NOW(),
+                       last_error = NULL""",
+                (taxlot, county_fips, search_url),
+            )
+            cn.commit()
+    except Exception as e:
+        print(f"[county_permits] cache write error: {e}")
+
+    return payload
+
+
+def fetch_crook_permits(taxlot: str, force_refresh: bool = False) -> dict:
+    """Convenience wrapper around fetch_county_permits for Crook (FIPS 013)."""
+    return fetch_county_permits(taxlot, "013", force_refresh)
+
+
+# =============================================================================
+# MULTNOMAH Layer 2 + Layer 3 Fetchers
+# =============================================================================
+# Reality check (2026-05-27, s2 Yindo session): of the three Layer 2 sources
+# named in YINDO_BRIEF_TERRA_MULTNOMAH.md, two are captcha-walled (MultcoPropTax
+# behind a generic captcha, MultcoRecords behind Google reCAPTCHA v2) and the
+# third (SAIL) is not in the public Multnomah Assessment & Taxation catalog —
+# may have been retired or renamed. See KB_78 handoff.
+#
+# What works: the bulk taxlot service from Multnomah is unusually RICH — owner,
+# situs, zoning, valuation, sale price/date, deed type/date/instrument, year
+# built, acreage are all native in parcels_multnomah. That's most of what we'd
+# fetch from PropTax anyway. So fetch_multco_proptax is a SQL pass-through over
+# Layer 1 inline data; the time-series stuff (tax payment history) is IN FLIGHT.
+#
+# Portland city parcels (~80% of Multnomah) also have an excellent permits
+# layer via Portland Maps' ArcGIS Hub — fetch_multnomah_permits hits the COP
+# OpenData Building Permit Details FeatureServer directly.
+# =============================================================================
+
+_MULTCO_CACHE_TTL_HOURS = 24
+# Portland Open Data — Residential Building Permits (Layer 89). Live and stable.
+# Catalog entry for "Building Permit Details" (layer 1288) is stale — not present
+# in the live MapServer as of 2026-05-27. Commercial + multi-family permits are
+# IN FLIGHT (likely live under a different bureau MapServer; needs Iosif/Yindo
+# follow-up to identify the unified all-permits endpoint).
+_PDX_PERMITS_URL = (
+    "https://www.portlandmaps.com/od/rest/services/"
+    "COP_OpenData_PlanningDevelopment/MapServer/89/query"
+)
+_PDX_PERMITS_LAYER_NAME = "Residential Building Permits (Portland Open Data Layer 89)"
+
+
+def fetch_multco_proptax(taxlot: str, force_refresh: bool = False) -> dict:
+    """Multnomah property snapshot (PropTax-equivalent) for a taxlot.
+
+    Built on parcels_multnomah Layer 1 inline data. The Multnomah taxlot service
+    ships owner, situs, valuation, sale, and deed natively — no upstream MultcoPropTax
+    call is required for the snapshot. Tax payment history + bill status are IN FLIGHT
+    (MultcoPropTax is captcha-walled; paid Tyler API tier pending Iosif decision).
+
+    Returns: {found, taxlot, propid, snapshot{owner,situs,valuation,sale,deed,zoning,improvements},
+              in_flight[], fetched_at, from_cache, source_url}
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    # Cache check
+    if not force_refresh:
+        try:
+            with _conn() as cn:
+                with cn.cursor() as cur:
+                    cur.execute(
+                        "SELECT taxlot, propid, payload_json, fetched_at, last_error "
+                        "FROM multco_proptax_cache WHERE taxlot = %s",
+                        (taxlot,),
+                    )
+                    cached = cur.fetchone()
+                    if cached:
+                        age = _dt.now(_tz.utc) - cached["fetched_at"]
+                        if age < _td(hours=_MULTCO_CACHE_TTL_HOURS) and cached["payload_json"]:
+                            payload = cached["payload_json"]
+                            payload["from_cache"] = True
+                            payload["cached_age_hours"] = round(age.total_seconds() / 3600, 1)
+                            return payload
+        except Exception as e:
+            print(f"[multco_proptax] cache read error: {e}")
+
+    # Pull from Layer 1
+    try:
+        with _conn() as cn:
+            with cn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT taxlot, propid, alt_account_num,
+                           owner_name, owner_name_2,
+                           mailing_address, mailing_city, mailing_state, mailing_zip,
+                           situs_address, situs_city, situs_state, situs_zip,
+                           zone_code, prop_class, prop_code, account_status, exemption,
+                           deed_type, deed_date, inst_num,
+                           sale_price, sale_date,
+                           size_acres, size_sqft, imp_type, act_year_built, main_sqft, units,
+                           roll_year, roll_land, roll_imp, roll_m50,
+                           ingested_at
+                    FROM parcels_multnomah WHERE taxlot = %s LIMIT 1
+                    """,
+                    (taxlot,),
+                )
+                row = cur.fetchone()
+    except Exception as e:
+        return {"found": False, "reason": f"DB error: {e}", "taxlot": taxlot}
+
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_multnomah", "taxlot": taxlot}
+
+    payload = {
+        "found": True,
+        "from_cache": False,
+        "taxlot": row["taxlot"],
+        "propid": row["propid"],
+        "alt_account_num": row["alt_account_num"],
+        "snapshot": {
+            "owner": {
+                "primary": row["owner_name"],
+                "secondary": row["owner_name_2"],
+                "mailing_address": row["mailing_address"],
+                "mailing_city": row["mailing_city"],
+                "mailing_state": row["mailing_state"],
+                "mailing_zip": row["mailing_zip"],
+            },
+            "situs": {
+                "address": row["situs_address"],
+                "city": row["situs_city"],
+                "state": row["situs_state"],
+                "zip": row["situs_zip"],
+            },
+            "valuation": {
+                "roll_year": row["roll_year"],
+                "roll_land": float(row["roll_land"]) if row["roll_land"] is not None else None,
+                "roll_imp": float(row["roll_imp"]) if row["roll_imp"] is not None else None,
+                "roll_m50_assessed": float(row["roll_m50"]) if row["roll_m50"] is not None else None,
+            },
+            "most_recent_sale": {
+                "sale_price": float(row["sale_price"]) if row["sale_price"] is not None else None,
+                "sale_date": row["sale_date"].isoformat() if row["sale_date"] else None,
+            },
+            "most_recent_deed": {
+                "deed_type": row["deed_type"],
+                "deed_date": row["deed_date"].isoformat() if row["deed_date"] else None,
+                "instrument_number": row["inst_num"],
+            },
+            "zoning": {"zone_code": row["zone_code"]},
+            "improvements": {
+                "type": row["imp_type"],
+                "year_built": row["act_year_built"],
+                "main_sqft": row["main_sqft"],
+                "units": row["units"],
+            },
+            "size": {
+                "acres": float(row["size_acres"]) if row["size_acres"] is not None else None,
+                "sqft": row["size_sqft"],
+            },
+            "account": {
+                "prop_class": row["prop_class"],
+                "prop_code": row["prop_code"],
+                "status": row["account_status"],
+                "exemption": row["exemption"],
+            },
+        },
+        "in_flight": [
+            "tax_payment_history (MultcoPropTax captcha-walled; paid Tyler API tier pending Iosif decision)",
+            "current_bill_status (same blocker)",
+        ],
+        "source": "parcels_multnomah Layer 1 (bulk taxlot service)",
+        "source_url": (
+            f"https://multcoproptax.com/  (manual search — site requires captcha; "
+            f"PropID for lookup: {row['propid']})"
+        ),
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+    # Cache write
+    try:
+        with _conn() as cn:
+            with cn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO multco_proptax_cache (taxlot, propid, payload_json, fetched_at, last_error)
+                       VALUES (%s, %s, %s::jsonb, NOW(), NULL)
+                       ON CONFLICT (taxlot) DO UPDATE SET
+                           propid = EXCLUDED.propid,
+                           payload_json = EXCLUDED.payload_json,
+                           fetched_at = NOW(),
+                           last_error = NULL""",
+                    (taxlot, row["propid"], _json.dumps(payload, default=str)),
+                )
+                cn.commit()
+    except Exception as e:
+        print(f"[multco_proptax] cache write error: {e}")
+
+    return payload
+
+
+def fetch_multco_records(taxlot: str, force_refresh: bool = False) -> dict:
+    """Multnomah recorded documents (deeds since 2002).
+
+    IN FLIGHT — MultcoRecords.com is gated by Google reCAPTCHA v2 on the disclaimer.
+    Best-available info comes from Layer 1: most-recent deed/instrument is inline.
+    Full deed history requires either (a) paid subscription, (b) human-in-the-loop
+    captcha solving, or (c) alternative source. Iosif decision pending.
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    try:
+        with _conn() as cn:
+            with cn.cursor() as cur:
+                cur.execute(
+                    """SELECT taxlot, owner_name, deed_type, deed_date, inst_num, sale_date, sale_price
+                       FROM parcels_multnomah WHERE taxlot = %s LIMIT 1""",
+                    (taxlot,),
+                )
+                row = cur.fetchone()
+    except Exception as e:
+        return {"found": False, "reason": f"DB error: {e}", "taxlot": taxlot}
+
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_multnomah", "taxlot": taxlot}
+
+    return {
+        "found": True,
+        "in_flight": True,
+        "taxlot": row["taxlot"],
+        "best_available_from_layer_1": {
+            "owner": row["owner_name"],
+            "most_recent_deed": {
+                "type": row["deed_type"],
+                "date": row["deed_date"].isoformat() if row["deed_date"] else None,
+                "instrument_number": row["inst_num"],
+            },
+            "most_recent_sale": {
+                "date": row["sale_date"].isoformat() if row["sale_date"] else None,
+                "price": float(row["sale_price"]) if row["sale_price"] is not None else None,
+            },
+        },
+        "in_flight_reason": (
+            "MultcoRecords.com (Digital Research Room) is gated by Google reCAPTCHA v2 "
+            "on its disclaimer page. Full recorded-document index since 2002 requires "
+            "either subscription access, human-in-the-loop captcha solving, or an alternative "
+            "data source. Pending Iosif decision on which path to take."
+        ),
+        "source_url": "https://multcorecords.com/",
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+
+def fetch_multco_sail(taxlot: str, force_refresh: bool = False) -> dict:
+    """Multnomah Survey and Assessment Image Locator (cadastral imagery + plats).
+
+    IN FLIGHT — As of 2026-05-27 the SAIL system is not listed in the public Multnomah
+    County Assessment & Taxation catalog. May have been retired, renamed, or moved
+    behind a different surface. Needs Iosif confirmation of current URL.
+    """
+    return {
+        "found": False,
+        "in_flight": True,
+        "taxlot": (taxlot or "").strip().upper(),
+        "in_flight_reason": (
+            "SAIL (Survey and Assessment Image Locator) is not in the public Multnomah "
+            "Assessment & Taxation catalog as of 2026-05-27. Need Iosif confirmation of "
+            "current URL or whether SAIL has been retired in favor of another surface. "
+            "Cadastral basics (map_id, township_range, assessor_map, legal_desc, tract_lot, "
+            "block) are available in parcels_multnomah Layer 1."
+        ),
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+
+def fetch_multnomah_permits(taxlot: str, force_refresh: bool = False) -> dict:
+    """Portland Maps Building Permit Details, spatial-intersected to the taxlot.
+
+    Source: City of Portland Open Data — COP_OpenData_PlanningDevelopment MapServer
+            layer 1288 "Building Permit Details" (no auth, public ArcGIS REST).
+    Coverage: Portland city parcels (~80% of Multnomah). Gresham + unincorporated
+    are IN FLIGHT (separate jurisdictions; need GreshamView + Multnomah direct).
+    Strategy: get parcel geom from parcels_multnomah → query Portland's permit
+    FeatureServer with spatial intersection by parcel envelope.
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    # Get parcel geom + situs city for jurisdiction routing
+    try:
+        with _conn() as cn:
+            with cn.cursor() as cur:
+                cur.execute(
+                    """SELECT taxlot, situs_city,
+                              ST_AsGeoJSON(ST_Envelope(geom))::jsonb AS bbox_json,
+                              ST_XMin(geom) AS xmin, ST_YMin(geom) AS ymin,
+                              ST_XMax(geom) AS xmax, ST_YMax(geom) AS ymax
+                       FROM parcels_multnomah WHERE taxlot = %s LIMIT 1""",
+                    (taxlot,),
+                )
+                row = cur.fetchone()
+    except Exception as e:
+        return {"found": False, "reason": f"DB error: {e}", "taxlot": taxlot}
+
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_multnomah", "taxlot": taxlot}
+
+    situs_city = (row["situs_city"] or "").upper().strip()
+    in_portland = situs_city in ("PORTLAND", "")  # blank city defaults to Portland routing (most common)
+
+    # Gresham + unincorporated routing
+    if not in_portland and situs_city != "PORTLAND":
+        return {
+            "found": True,
+            "in_flight": True,
+            "taxlot": taxlot,
+            "situs_city": situs_city,
+            "jurisdiction": "Gresham" if "GRESHAM" in situs_city else "Multnomah unincorporated / other",
+            "permits": [],
+            "in_flight_reason": (
+                f"Parcel is in {situs_city}, not Portland city. Portland Maps permits "
+                "feed only covers City of Portland jurisdiction. Gresham permits (GreshamView) "
+                "and Multnomah unincorporated (county direct) fetchers are IN FLIGHT — "
+                "build as a Phase 2 follow-up after Iosif validates the Portland-city path."
+            ),
+            "fetched_at": _dt.now(_tz.utc).isoformat(),
+        }
+
+    # Portland Maps ArcGIS REST query — spatial intersection with parcel envelope
+    # Build esriGeometry envelope (xmin, ymin, xmax, ymax in WGS84)
+    geom_param = _json.dumps({
+        "xmin": float(row["xmin"]), "ymin": float(row["ymin"]),
+        "xmax": float(row["xmax"]), "ymax": float(row["ymax"]),
+        "spatialReference": {"wkid": 4326},
+    })
+
+    params = {
+        "where": "1=1",
+        "geometry": geom_param,
+        "geometryType": "esriGeometryEnvelope",
+        "inSR": "4326",
+        "spatialRel": "esriSpatialRelIntersects",
+        "outFields": "*",
+        "returnGeometry": "false",
+        "outSR": "4326",
+        "f": "json",
+        "resultRecordCount": "200",
+    }
+
+    try:
+        with _httpx.Client(timeout=20.0, headers={"User-Agent": _DIAL_USER_AGENT}) as c:
+            r = c.get(_PDX_PERMITS_URL, params=params)
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        return {
+            "found": False,
+            "reason": f"Portland Maps permits fetch error: {e}",
+            "taxlot": taxlot,
+        }
+
+    if "error" in data:
+        return {
+            "found": False,
+            "reason": f"Portland Maps API error: {data['error']}",
+            "taxlot": taxlot,
+        }
+
+    features = data.get("features", []) or []
+    permits = []
+    for f in features:
+        attrs = f.get("attributes", {}) or {}
+        permits.append(attrs)
+
+    return {
+        "found": True,
+        "from_cache": False,
+        "taxlot": taxlot,
+        "situs_city": situs_city or "PORTLAND (inferred)",
+        "jurisdiction": "City of Portland",
+        "permit_count": len(permits),
+        "permits": permits,
+        "source": f"Portland Maps — {_PDX_PERMITS_LAYER_NAME}",
+        "source_url": _PDX_PERMITS_URL,
+        "coverage_note": (
+            "RESIDENTIAL building permits only. Commercial + multi-family permits are "
+            "IN FLIGHT — Portland's unified all-permits endpoint hasn't been located yet."
+        ),
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
 
 
 # =============================================================================

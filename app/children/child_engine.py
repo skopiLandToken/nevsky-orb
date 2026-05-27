@@ -35,6 +35,13 @@ from .orb_db import (
     fetch_dial_sales,
     fetch_dial_valuation,
     fetch_dial_dev_docs,
+    fetch_multco_proptax,
+    fetch_multco_records,
+    fetch_multco_sail,
+    fetch_multnomah_permits,
+    fetch_crook_assessment,
+    fetch_crook_permits,
+    fetch_county_permits,
     query_yakov_handoffs,
     query_yakov_commits,
     calculate_lot_yield,
@@ -70,6 +77,13 @@ TIER_TOOLS = {
         "fetch_dial_sales",
         "fetch_dial_valuation",
         "fetch_dial_dev_docs",
+        "fetch_multco_proptax",
+        "fetch_multco_records",
+        "fetch_multco_sail",
+        "fetch_multnomah_permits",
+        "fetch_crook_assessment",
+        "fetch_crook_permits",
+        "fetch_county_permits",
         "query_yakov_handoffs",
         "query_yakov_commits",
         "calculate_lot_yield",
@@ -85,6 +99,13 @@ TIER_TOOLS = {
         "fetch_dial_sales",
         "fetch_dial_valuation",
         "fetch_dial_dev_docs",
+        "fetch_multco_proptax",
+        "fetch_multco_records",
+        "fetch_multco_sail",
+        "fetch_multnomah_permits",
+        "fetch_crook_assessment",
+        "fetch_crook_permits",
+        "fetch_county_permits",
         "calculate_lot_yield",
         "web_search",
     ],
@@ -172,7 +193,7 @@ ALL_TOOL_SCHEMAS = {
     },
     "lookup_parcel_by_point": {
         "name": "lookup_parcel_by_point",
-        "description": "TERRA-FIELD-6c MAX HYPE. Look up the county parcel containing a given latitude/longitude across all TERRA-covered counties (currently Deschutes + Crook; Jefferson + Lane arriving). Use when the user shares a location pin or asks about a parcel at coordinates. Returns: taxlot, county (Deschutes/Crook), county_fips, section_id, acres, county_url (DIAL for Deschutes, PATS for Crook), map_number, owner_name (Crook native), situs_address (Crook native), zone_code, zone_label, parcel_centroid. CRITICAL: This is a SHOWCASE moment. The user is demoing TERRA to investors / real estate agents / partners. NO markdown tables (pipes render raw). Use bold *labels*, dramatic dividers, generous emoji storytelling.\n\nCOUNTY-AWARE RENDERING: Adapt the subtitle and direct-link line based on the `county` field returned. Crook lookups include owner_name + situs_address inline — surface those prominently. Deschutes lookups don't (use fetch_dial_* for those). Zoning is now LIVE in both Deschutes (resolved per parcel via PostGIS zoning layer) and Crook (native in parcel attributes) — show zone_code + zone_label, never frame zoning as IN FLIGHT.\n\nTEMPLATE — adapt with real data, keep the energy:\n\n✨🛰️ *TERRA SCAN COMPLETE* 🛰️✨\n🎆 _{county} County · Live Spatial Intelligence_ 🎆\n\n⭐━━━━━━━━━━━━━━━━━⭐\n\n🎯 *PARCEL LOCATED*\n🏷️ `{taxlot}`\n\n🗺️ *Section:* {section_id}\n🧭 *County Map:* {map_number}\n📐 *Footprint:* *{acres} acres* _({sqft:,} sq ft)_\n📍 *Centroid:* {lat}°N, {lon}°W\n\n[IF owner_name present:]\n👤 *Owner of Record:* {owner_name}\n🏠 *Situs:* {situs_address or '— vacant —'}\n\n⭐━━━━━━━━━━━━━━━━━⭐\n\n🏘️ *ZONING LAYER*\n📛 *Zone:* `{zone_code}` — {zone_label}\n\n🏗️ *DEVELOPMENT MATH*\n_Tap_ 💡 *YIELD CALC* _below for buildable-lot math, or just say it._\n\n⭐━━━━━━━━━━━━━━━━━⭐\n\n🔥 *PERMIT & ACTIVITY SCAN*\n_Live county permit pull is one tap away. Sophia will hit the county records system, parse the permit list, and tell you exactly whats been filed and whether anyone is actively developing this parcel._ 🚧\n\n⭐━━━━━━━━━━━━━━━━━⭐\n\n🔗 *DIRECT TO TRUTH*\n[For Deschutes:] Deschutes DIAL → {county_url}\n[For Crook:] Crook PATS → {county_url}\n\n💎 _— Sophia · Nevsky ORB · {county} Layer Active_ 💎\n\n👇 _Tap a button below to dig deeper, or just tell me what you want._\n\nTONE: CIA-grade land briefing in a tuxedo. Confident. Theatrical. TERRA SCAN COMPLETE should feel like a vault opening. When pieces are genuinely not built yet (Jefferson permits, Lane records, etc.), frame as IN FLIGHT — never apologize. The user is showing this to other people; make them look brilliant. Always end with one specific follow-up beyond the buttons.",
+        "description": "TERRA-FIELD-6c MAX HYPE. Look up the county parcel containing a given latitude/longitude across all TERRA-covered counties (currently Deschutes + Crook + Multnomah; Jefferson + Lane arriving). Use when the user shares a location pin or asks about a parcel at coordinates. Returns: taxlot, county (Deschutes/Crook), county_fips, section_id, acres, county_url (DIAL for Deschutes, PATS for Crook), map_number, owner_name (Crook native), situs_address (Crook native), zone_code, zone_label, parcel_centroid. CRITICAL: This is a SHOWCASE moment. The user is demoing TERRA to investors / real estate agents / partners. NO markdown tables (pipes render raw). Use bold *labels*, dramatic dividers, generous emoji storytelling.\n\nCOUNTY-AWARE RENDERING: Adapt the subtitle and direct-link line based on the `county` field returned. Crook lookups include owner_name + situs_address inline — surface those prominently. Deschutes lookups don't (use fetch_dial_* for those). Zoning is now LIVE in both Deschutes (resolved per parcel via PostGIS zoning layer) and Crook (native in parcel attributes) — show zone_code + zone_label, never frame zoning as IN FLIGHT.\n\nTEMPLATE — adapt with real data, keep the energy:\n\n✨🛰️ *TERRA SCAN COMPLETE* 🛰️✨\n🎆 _{county} County · Live Spatial Intelligence_ 🎆\n\n⭐━━━━━━━━━━━━━━━━━⭐\n\n🎯 *PARCEL LOCATED*\n🏷️ `{taxlot}`\n\n🗺️ *Section:* {section_id}\n🧭 *County Map:* {map_number}\n📐 *Footprint:* *{acres} acres* _({sqft:,} sq ft)_\n📍 *Centroid:* {lat}°N, {lon}°W\n\n[IF owner_name present:]\n👤 *Owner of Record:* {owner_name}\n🏠 *Situs:* {situs_address or '— vacant —'}\n\n⭐━━━━━━━━━━━━━━━━━⭐\n\n🏘️ *ZONING LAYER*\n📛 *Zone:* `{zone_code}` — {zone_label}\n\n🏗️ *DEVELOPMENT MATH*\n_Tap_ 💡 *YIELD CALC* _below for buildable-lot math, or just say it._\n\n⭐━━━━━━━━━━━━━━━━━⭐\n\n🔥 *PERMIT & ACTIVITY SCAN*\n_Live county permit pull is one tap away. Sophia will hit the county records system, parse the permit list, and tell you exactly whats been filed and whether anyone is actively developing this parcel._ 🚧\n\n⭐━━━━━━━━━━━━━━━━━⭐\n\n🔗 *DIRECT TO TRUTH*\n[For Deschutes:] Deschutes DIAL → {county_url}\n[For Crook:] Crook PATS → {county_url}\n\n💎 _— Sophia · Nevsky ORB · {county} Layer Active_ 💎\n\n👇 _Tap a button below to dig deeper, or just tell me what you want._\n\nTONE: CIA-grade land briefing in a tuxedo. Confident. Theatrical. TERRA SCAN COMPLETE should feel like a vault opening. When pieces are genuinely not built yet (Jefferson permits, Lane records, etc.), frame as IN FLIGHT — never apologize. The user is showing this to other people; make them look brilliant. Always end with one specific follow-up beyond the buttons.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -230,6 +251,91 @@ ALL_TOOL_SCHEMAS = {
             "required": ["taxlot"]
         }
     },
+    "fetch_multco_proptax": {
+        "name": "fetch_multco_proptax",
+        "description": "TERRA: Fetch the Multnomah County property snapshot for a taxlot — owner of record, mailing + situs addresses, current-roll valuation (land/imp/Measure-50 assessed), most-recent sale price + date, most-recent deed type + instrument number, zoning code, improvements (year built / main sqft / units), acreage. Use when the user asks about who owns a Portland parcel, what it sold for, what it's worth, zoning, or any property snapshot question on a Multnomah taxlot. Returns a rich payload built from the bulk taxlot service (Multnomah's L1 ships native owner + valuation, so this is a zero-upstream-call Sophia-fast snapshot). MARKS as IN FLIGHT: tax payment history and current bill status (MultcoPropTax.com is captcha-walled; paid Tyler API tier pending Iosif decision). FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (👤 OWNER / 📍 SITUS / 📊 VALUATION / 💰 LAST SALE / 📋 LAST DEED / 🏘️ ZONING / 🏗️ IMPROVEMENTS). List IN FLIGHT items at end as 'coming soon' — never apologize. End with the source_url for manual deep-dive.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Full Multnomah taxlot ID (MAPTAXLOT format, e.g. '1N1E22BC  3500')."},
+                "force_refresh": {"type": "boolean", "default": False, "description": "Bypass 24h cache and re-pull from parcels_multnomah. Rarely needed since L1 reingests nightly."}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_multco_records": {
+        "name": "fetch_multco_records",
+        "description": "TERRA: Fetch the Multnomah RECORDED DOCUMENT history for a taxlot — deeds, mortgages, liens, recorded since 2002. CURRENTLY IN FLIGHT: the upstream source (MultcoRecords.com Digital Research Room) is gated by Google reCAPTCHA v2, blocking automated retrieval. Returns the best-available recorded-instrument data from parcels_multnomah Layer 1 (most-recent deed type + date + instrument number, plus most-recent sale) and flags the full history as IN FLIGHT pending paid-tier authorization or alternative source. FORMATTING: TERRA aesthetic. 📜 emoji header. Surface the most-recent deed prominently. Frame the IN FLIGHT honestly — 'full chain of title since 2002 is coming once we wire the paid tier' — never apologize, never fabricate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string"},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_multco_sail": {
+        "name": "fetch_multco_sail",
+        "description": "TERRA: Fetch Multnomah SAIL (Survey and Assessment Image Locator) cadastral imagery — surveys, recorded plats, cadastral maps. CURRENTLY IN FLIGHT: SAIL is not listed in the public Multnomah Assessment & Taxation catalog as of 2026-05-27 — may have been retired, renamed, or moved. Cadastral basics (map_id, township/range, assessor_map, legal_desc, tract_lot, block) are available in parcels_multnomah Layer 1. FORMATTING: TERRA aesthetic. 🗺️ emoji header. Frame as 'SAIL surface re-confirmation pending' — never apologize, never fabricate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string"},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_multnomah_permits": {
+        "name": "fetch_multnomah_permits",
+        "description": "TERRA: Fetch the live PERMIT HISTORY for a Multnomah parcel from Portland's open-data ArcGIS feed (Building Permit Details, COP_OpenData_PlanningDevelopment Layer 1288). Spatial-intersects the parcel envelope to grab permits filed inside or touching the lot. Use when the user asks about permits, building activity, development status, or what's been filed on a specific Multnomah taxlot. COVERAGE: City of Portland parcels (~80% of Multnomah). Gresham + Multnomah unincorporated are IN FLIGHT (separate jurisdictions; need GreshamView + county direct, Phase 2). Returns permit_count and full permit attribute list. FORMATTING: TERRA aesthetic. 🚧 emoji header. Group permits by status or type. Call out anything filed in the last 12 months as 'active development' vs older permits as 'history.' If parcel is Gresham/unincorporated, frame as 'Portland city permits feed doesn't cover this jurisdiction — Phase 2 fetcher in flight.' End with the source_url.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Multnomah taxlot ID (MAPTAXLOT format)."},
+                "force_refresh": {"type": "boolean", "default": False, "description": "Currently unused — v1 hits Portland Maps live each call. Caching is a Phase 2 follow-up."}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_crook_assessment": {
+        "name": "fetch_crook_assessment",
+        "description": "TERRA: Fetch the Crook County assessment + ownership snapshot for a taxlot. Use when the user asks about who owns a Crook parcel, what's on file, account info, prop class, zoning, or any property snapshot question on a Crook taxlot. Returns owner_name, situs + mailing addresses, account number, prop_class + description, tax_code_area, subdivision (if platted), assessed + GIS acreage, zoning code + label, plus verified deep links to the tax card PDF, tax map PDF, and PSO recorder. IN FLIGHT — flag these honestly, do not invent numbers: structured valuation (real-market / assessed / taxable), multi-year tax payment history, full sales chain. The legacy Crook tax cards are scanned image PDFs from 2013 — OCR pipeline is queued; until then the user gets the PDF link to read directly. The PSO recorder is a Blazor SPA that needs Playwright or alt source; deep link is provided. FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (👤 OWNER / 📍 SITUS / 🧾 ACCOUNT / 🏘️ ZONING / 🌍 ACREAGE). List IN FLIGHT items at the end as 'coming soon' — never apologize. Always end with the tax_card_pdf direct link and the pso_recorder link so the broker can pull the source themselves.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Full Crook taxlot ID (e.g. '151605BB07500')."},
+                "force_refresh": {"type": "boolean", "default": False, "description": "Bypass 24h cache. Rarely needed since the snapshot is driven by L1 inline data."}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_crook_permits": {
+        "name": "fetch_crook_permits",
+        "description": "TERRA: Fetch building permits for a Crook County parcel via Oregon's state ePermitting portal (Accela ACA). Convenience wrapper around fetch_county_permits with county_fips='013' pre-set. Use when the user asks about permits, building activity, development status on a Crook taxlot. IN FLIGHT — server-side scrape of the Accela result page is gated on viewstate-capture work; currently returns a verified deep link the user clicks through to run the search themselves (one search-submit reveals the live permit list). FORMATTING: TERRA aesthetic. 🚧 emoji header. Frame the deep link as 'one tap from the live state portal' and surface it prominently. Never apologize for the IN FLIGHT — frame as the scrape upgrade arriving.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Full Crook taxlot ID."},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_county_permits": {
+        "name": "fetch_county_permits",
+        "description": "TERRA: Fetch building permits for ANY Oregon county that participates in the state ePermitting portal (Accela ACA). Reusable across Crook (FIPS 013), Jefferson (031), Lane (039), and other participating counties — pass the county_fips alongside the taxlot. Counties NOT in the state system (Deschutes uses DIAL; Multnomah uses Portland Maps) return a structured 'not_applicable' response routing the caller to the county-native fetcher. Use this when handling permits for any non-Deschutes, non-Multnomah Oregon parcel. CURRENT STATUS — same as fetch_crook_permits: returns the verified Accela deep link, scrape upgrade IN FLIGHT. FORMATTING: TERRA aesthetic. 🚧 emoji header. Branch on status — 'deep_link_only' surfaces the link, 'not_applicable' redirects to the right county-native fetcher.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Full taxlot ID for the parcel."},
+                "county_fips": {"type": "string", "description": "Three-digit county FIPS code without state prefix (e.g. '013' for Crook, '031' for Jefferson, '039' for Lane)."},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot", "county_fips"]
+        }
+    },
     "calculate_lot_yield": {
         "name": "calculate_lot_yield",
         "description": "TERRA — SPECULATIVE residential lot-yield analysis. Verify with planning office before quoting. Computes a rough estimate of how many residential lots could theoretically be carved from a Deschutes County parcel and (optionally) the gross retail value if the broker provides a per-lot market estimate. CALL when a broker asks 'how many lots can I get on parcel X', 'what's parcel X worth as a development', 'what's the yield on this taxlot', or after a TERRA SCAN COMPLETE on a residential parcel ≥1.0 acre. INPUTS: parcel_id (taxlot string, required). Optional: deduction_override (0-1 fraction for roads/utilities/setbacks; default 0.25 = 25%), per_lot_value_override (USD per finished lot — broker's own market number; if omitted, the tool returns a yield-only result and prompts the broker for their estimate), target_zone_override (force a different zone for what-if rezone scenarios). BEHAVIOR: (a) if the parcel has no zoning on file, the tool live-queries the county GIS service and caches the result — adds ~500ms latency but completes the call. (b) Non-residential zones return an informational dict (not an error) noting yield-calc doesn't apply. (c) Zones outside the seed lookup return a structured error with guidance — NO fake numbers. (d) Every result carries a footer disclaimer: 'TERRA estimate — actual yield subject to site conditions, plat approval, and jurisdictional review. Verify with the city/county planning office before underwriting.' DOCTRINE: per DOCTRINE-TERRA-ANALYSIS-TOOL-01, this tool is speculative analysis only — never quote outputs as certified yield or appraised value. Per DOCTRINE-YIELD-HOOK-THEN-CLOSE-01, the v1 output is the broker hook; v2 'deep dive' refinement (setbacks, slope, wetlands) comes later. FORMATTING for Sophia's reply: render the result as a TERRA card with the broker-friendly numbers up front (lot_yield, gross_retail if available), then assumptions, then the footer. NEVER omit the footer.",
@@ -284,6 +390,13 @@ LOCAL_TOOL_FUNCTIONS = {
     "fetch_dial_sales": fetch_dial_sales,
     "fetch_dial_valuation": fetch_dial_valuation,
     "fetch_dial_dev_docs": fetch_dial_dev_docs,
+    "fetch_multco_proptax": fetch_multco_proptax,
+    "fetch_multco_records": fetch_multco_records,
+    "fetch_multco_sail": fetch_multco_sail,
+    "fetch_multnomah_permits": fetch_multnomah_permits,
+    "fetch_crook_assessment": fetch_crook_assessment,
+    "fetch_crook_permits": fetch_crook_permits,
+    "fetch_county_permits": fetch_county_permits,
     "get_site_plans": get_site_plans,
     "get_ai_spend_today": get_ai_spend_today,
     "query_yakov_handoffs": query_yakov_handoffs,
