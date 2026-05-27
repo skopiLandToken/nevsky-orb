@@ -389,7 +389,37 @@ COUNTY_REGISTRY = {
             LIMIT 1
         """,
     },
-    # Jefferson (031) and Lane (039) entries land here when their L1 tables exist.
+    "039": {  # Lane (FIPS 41-039) — Tier 1 Flagship, Eugene/Springfield metro
+        "name": "Lane",
+        # bbox: Lane is one of Oregon's largest counties — Pacific coast (Florence)
+        # east to the Cascade crest, with the Eugene/Springfield core in the western
+        # interior. Bbox padded so coastal + crest-edge parcels don't fall through.
+        "bbox": (43.40, 44.40, -124.30, -121.75),
+        "query": """
+            SELECT taxlot,
+                   taxmap_number AS section_id,
+                   ROUND(COALESCE(legal_area_acres, estimated_area_acres)::numeric, 3) AS acres,
+                   -- rlid_link is the canonical per-parcel deep link the LGDC service
+                   -- expects callers to surface. RLID full reports are subscription-gated,
+                   -- but the URL lands the user on the property summary regardless.
+                   -- Fallback: A&T public lookup at apps.lanecounty.org if rlid_link is null.
+                   COALESCE(rlid_link,
+                            'https://apps.lanecounty.org/PropertyAccountInformation/?searchType=MapTaxlot&maptaxlot=' || taxlot
+                   ) AS county_url,
+                   taxmap_number AS map_number,
+                   reference_owner_name AS owner_name,
+                   reference_full_address AS situs_address,
+                   base_zone_code AS zone_code,
+                   COALESCE(base_zone_code || ' / ' || plan_designation_code, base_zone_code) AS zone_label,
+                   ST_AsText(ST_Centroid(geom)) AS parcel_centroid,
+                   'Lane'::text AS county_name,
+                   '039'::text AS county_fips
+            FROM parcels_lane
+            WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            LIMIT 1
+        """,
+    },
+    # Jefferson (031) lands here when its L1 table exists.
 }
 
 
@@ -2008,6 +2038,387 @@ def fetch_washington_permits(taxlot: str, force_refresh: bool = False) -> dict:
         print(f"[wash_permits] cache write error: {e}")
 
     return payload
+
+
+# =============================================================================
+# LANE Layer 2 + Layer 3 Fetchers (s2 Yindo session — 2026-05-27)
+# =============================================================================
+# Reality of the Lane integration (carries forward to Tier 2/3/4 builds):
+#
+#   1. parcels_lane Layer 1 ships the RICHEST inline attribute set of any Oregon
+#      county TERRA has integrated — owner, situs, RMV land/impr/personal, AV,
+#      taxable value, tax certified, zoning, plan designation, UGB code, fire
+#      district, school district, census FIPS, and neighborhood association are
+#      all native at L1. fetch_lane_assessment is therefore a SQL pass-through
+#      over L1 — no upstream fetch is needed for the snapshot. Multi-year tax
+#      payment history + bill status are IN FLIGHT (Lane A&T portal at
+#      apps.lanecounty.org/PropertyAccountInformation/ is JS-rendered; account-
+#      detail URL contract not captured this pass).
+#
+#   2. Lane records / deed chain / sales history live with the Lane County Clerk
+#      recordings office, which has no public queryable API as of 2026-05-27.
+#      RLID (rlid.org) consolidates these but full reports are subscription-gated.
+#      fetch_lane_records returns the per-parcel rlid_link plus an IN FLIGHT
+#      framing — no fake completion.
+#
+#   3. Lane County + Springfield participate in the Oregon state ePermitting
+#      portal. Eugene runs its own PDD permitting — fetch_lane_permits branches
+#      on planning_jurisdiction_code and routes Eugene parcels to PDD, everything
+#      else to fetch_county_permits with county_fips='039'.
+# =============================================================================
+
+_LANE_CACHE_TTL_HOURS = 24
+_LANE_AT_BASE = "https://apps.lanecounty.org/PropertyAccountInformation"
+_LANE_RLID_BASE = "https://www.rlid.org"
+_EUGENE_PDD_PERMITS = "https://www.eugene-or.gov/3360/Permits"
+
+
+def fetch_lane_assessment(taxlot: str, force_refresh: bool = False) -> dict:
+    """Lane assessment + ownership + valuation snapshot for a taxlot.
+
+    Layer 1 inline data (Lane LGDC service ships owner, situs, RMV, AV, taxable,
+    tax certified, zoning, plan designation, jurisdiction, districts) is the
+    source of truth. Tax payment history is IN FLIGHT (Lane A&T portal is
+    JS-rendered; account-detail URL contract not captured).
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    if not force_refresh:
+        try:
+            with _conn() as cn, cn.cursor() as cur:
+                cur.execute(
+                    "SELECT taxlot, account_number, payload_json, fetched_at, last_error "
+                    "FROM lane_assessment_cache WHERE taxlot = %s",
+                    (taxlot,),
+                )
+                cached = cur.fetchone()
+                if cached and cached["payload_json"]:
+                    age = _dt.now(_tz.utc) - cached["fetched_at"]
+                    if age < _td(hours=_LANE_CACHE_TTL_HOURS):
+                        payload = cached["payload_json"]
+                        payload["from_cache"] = True
+                        payload["cached_age_hours"] = round(age.total_seconds() / 3600, 1)
+                        return payload
+        except Exception as e:
+            print(f"[lane_assessment] cache read error: {e}")
+
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT taxlot, county_fips, maptaxlot_display, taxmap_number,
+                       reference_account_number,
+                       reference_owner_name, owner_count,
+                       reference_full_address, address_count,
+                       tax_code_area, has_tax_code_split,
+                       total_real_market_value, total_real_market_value_land,
+                       total_real_market_value_impr, total_real_market_value_pers,
+                       total_assessed_value, total_taxable_value, total_amount_exempted,
+                       total_tax_amount_certified, exemption_count, reference_exemption_type,
+                       property_class_code, property_class_name,
+                       statistical_class_code, statistical_class_name,
+                       detailed_land_use_name, general_land_use_name, land_use_class,
+                       base_zone_code, plan_designation_code,
+                       planning_jurisdiction_code, incorporated_city_code,
+                       urban_growth_boundary_code, urban_reserve_code,
+                       improvement_count, reference_imprvmnt_type, reference_imprvmnt_year_built,
+                       total_impr_finished_area_sqft, total_impr_base_area_sqft, structure_count,
+                       school_district_code, fire_protection_provider_code,
+                       neighborhood_association_name, market_area_name,
+                       census_tract_fips_code, census_block_fips_code,
+                       legal_area_acres, estimated_area_acres,
+                       reference_plat_name,
+                       rlid_link
+                FROM parcels_lane WHERE taxlot = %s LIMIT 1
+                """,
+                (taxlot,),
+            )
+            row = cur.fetchone()
+    except Exception as e:
+        return {"found": False, "reason": f"DB error: {e}", "taxlot": taxlot}
+
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_lane", "taxlot": taxlot}
+
+    rlid_link = row["rlid_link"]
+    at_search_url = f"{_LANE_AT_BASE}/?searchType=MapTaxlot&maptaxlot={taxlot}"
+
+    payload = {
+        "found": True,
+        "from_cache": False,
+        "taxlot": row["taxlot"],
+        "maptaxlot_display": row["maptaxlot_display"],
+        "account_number": row["reference_account_number"],
+        "county_fips": row["county_fips"],
+        "source": "parcels_lane L1 inline (LCOG/LGDC Taxlot__Public service)",
+        "snapshot": {
+            "owner": {
+                "primary": row["reference_owner_name"],
+                "owner_count": row["owner_count"],
+            },
+            "situs": {
+                "address": row["reference_full_address"],
+                "address_count": row["address_count"],
+            },
+            "valuation": {
+                "real_market_total": row["total_real_market_value"],
+                "real_market_land": row["total_real_market_value_land"],
+                "real_market_improvements": row["total_real_market_value_impr"],
+                "real_market_personal": row["total_real_market_value_pers"],
+                "assessed_value": row["total_assessed_value"],
+                "taxable_value": row["total_taxable_value"],
+                "amount_exempted": row["total_amount_exempted"],
+                "tax_certified_annual": float(row["total_tax_amount_certified"]) if row["total_tax_amount_certified"] is not None else None,
+                "exemption_count": row["exemption_count"],
+                "exemption_type": row["reference_exemption_type"],
+            },
+            "taxation": {
+                "tax_code_area": row["tax_code_area"],
+                "has_tax_code_split": row["has_tax_code_split"],
+            },
+            "classification": {
+                "property_class_code": row["property_class_code"],
+                "property_class_name": row["property_class_name"],
+                "statistical_class_code": row["statistical_class_code"],
+                "statistical_class_name": row["statistical_class_name"],
+                "detailed_land_use": row["detailed_land_use_name"],
+                "general_land_use": row["general_land_use_name"],
+                "land_use_class": row["land_use_class"],
+            },
+            "zoning": {
+                "code": row["base_zone_code"],
+                "plan_designation": row["plan_designation_code"],
+                "label": (
+                    f"{row['base_zone_code']} / {row['plan_designation_code']}"
+                    if row["base_zone_code"] and row["plan_designation_code"]
+                    else row["base_zone_code"]
+                ),
+            },
+            "planning": {
+                "jurisdiction_code": row["planning_jurisdiction_code"],
+                "incorporated_city": row["incorporated_city_code"],
+                "urban_growth_boundary": row["urban_growth_boundary_code"],
+                "urban_reserve": row["urban_reserve_code"],
+                "market_area": row["market_area_name"],
+                "neighborhood": row["neighborhood_association_name"],
+                "plat": row["reference_plat_name"],
+            },
+            "improvements": {
+                "improvement_count": row["improvement_count"],
+                "primary_type": row["reference_imprvmnt_type"],
+                "year_built": row["reference_imprvmnt_year_built"],
+                "finished_area_sqft": row["total_impr_finished_area_sqft"],
+                "base_area_sqft": row["total_impr_base_area_sqft"],
+                "structure_count": row["structure_count"],
+            },
+            "districts": {
+                "school_district": row["school_district_code"],
+                "fire_protection": row["fire_protection_provider_code"],
+                "census_tract_fips": row["census_tract_fips_code"],
+                "census_block_fips": row["census_block_fips_code"],
+            },
+            "area": {
+                "legal_acres": float(row["legal_area_acres"]) if row["legal_area_acres"] is not None else None,
+                "estimated_acres": float(row["estimated_area_acres"]) if row["estimated_area_acres"] is not None else None,
+            },
+            "map_number": row["taxmap_number"],
+        },
+        "deep_links": {
+            "lane_at_search": at_search_url,
+            "rlid_property_report": rlid_link,
+            "lane_at_home": "https://www.lanecountyor.gov/cms/one.aspx?pageId=3252952",
+        },
+        "in_flight": [
+            "Multi-year tax payment history + bill status — apps.lanecounty.org A&T detail is JS-rendered; account-detail URL contract not captured. Snapshot above carries the current roll year only.",
+            "RLID full property report — subscription-gated. Deep link above lands the user on the property summary regardless; full report requires LCOG / paid public account.",
+        ],
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO lane_assessment_cache (taxlot, account_number, payload_json, fetched_at, last_error)
+                   VALUES (%s, %s, %s::jsonb, NOW(), NULL)
+                   ON CONFLICT (taxlot) DO UPDATE SET
+                       account_number = EXCLUDED.account_number,
+                       payload_json = EXCLUDED.payload_json,
+                       fetched_at = NOW(),
+                       last_error = NULL""",
+                (taxlot, row["reference_account_number"], _json.dumps(payload)),
+            )
+            cn.commit()
+    except Exception as e:
+        print(f"[lane_assessment] cache write error: {e}")
+
+    return payload
+
+
+def fetch_lane_records(taxlot: str, force_refresh: bool = False) -> dict:
+    """Lane recorded-documents / deed chain / sales history for a taxlot.
+
+    CURRENTLY IN FLIGHT — Lane County Clerk has no public queryable API; RLID
+    consolidates but full reports are subscription-gated. Returns current owner
+    + canonical RLID deep link with honest IN FLIGHT framing.
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    if not force_refresh:
+        try:
+            with _conn() as cn, cn.cursor() as cur:
+                cur.execute(
+                    "SELECT taxlot, owner_name, documents_json, document_count, fetched_at "
+                    "FROM lane_records_cache WHERE taxlot = %s",
+                    (taxlot,),
+                )
+                cached = cur.fetchone()
+                if cached:
+                    age = _dt.now(_tz.utc) - cached["fetched_at"]
+                    if age < _td(hours=_LANE_CACHE_TTL_HOURS):
+                        return {
+                            "found": True,
+                            "from_cache": True,
+                            "cached_age_hours": round(age.total_seconds() / 3600, 1),
+                            "taxlot": taxlot,
+                            "owner_name": cached["owner_name"],
+                            "snapshot": {"owner_now": cached["owner_name"]},
+                            "documents": cached["documents_json"] or [],
+                            "document_count": cached["document_count"] or 0,
+                            "deep_links": {
+                                "clerk_recordings": "https://www.lanecountyor.gov/cms/one.aspx?pageId=2818275",
+                            },
+                            "in_flight": [
+                                "Full chain of title / deed history — Lane Clerk has no public API. RLID subscription tier or paid Tyler integration are the open paths.",
+                            ],
+                            "fetched_at": cached["fetched_at"].isoformat(),
+                        }
+        except Exception as e:
+            print(f"[lane_records] cache read error: {e}")
+
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """SELECT taxlot, reference_owner_name, owner_count,
+                          reference_full_address, reference_plat_name,
+                          rlid_link
+                   FROM parcels_lane WHERE taxlot = %s LIMIT 1""",
+                (taxlot,),
+            )
+            row = cur.fetchone()
+    except Exception as e:
+        return {"found": False, "reason": f"DB error: {e}", "taxlot": taxlot}
+
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_lane", "taxlot": taxlot}
+
+    payload = {
+        "found": True,
+        "from_cache": False,
+        "taxlot": row["taxlot"],
+        "owner_name": row["reference_owner_name"],
+        "snapshot": {
+            "owner_now": row["reference_owner_name"],
+            "owner_count": row["owner_count"],
+            "situs_address": row["reference_full_address"],
+            "plat": row["reference_plat_name"],
+        },
+        "documents": [],
+        "document_count": 0,
+        "deep_links": {
+            "rlid_property_report": row["rlid_link"],
+            "clerk_recordings": "https://www.lanecountyor.gov/cms/one.aspx?pageId=2818275",
+            "lane_at_search": f"{_LANE_AT_BASE}/?searchType=MapTaxlot&maptaxlot={taxlot}",
+        },
+        "in_flight": [
+            "Full chain of title / deed history — Lane Clerk has no public queryable API as of 2026-05-27. Open paths: (a) RLID paid tier, (b) paid Tyler integration, (c) per-deed Clerk export.",
+            "Sales chain — same blocker. Most-recent ownership above is current as of last L1 refresh.",
+        ],
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO lane_records_cache (taxlot, owner_name, documents_json, document_count, fetched_at, last_error)
+                   VALUES (%s, %s, '[]'::jsonb, 0, NOW(), NULL)
+                   ON CONFLICT (taxlot) DO UPDATE SET
+                       owner_name = EXCLUDED.owner_name,
+                       documents_json = EXCLUDED.documents_json,
+                       document_count = EXCLUDED.document_count,
+                       fetched_at = NOW(),
+                       last_error = NULL""",
+                (taxlot, row["reference_owner_name"]),
+            )
+            cn.commit()
+    except Exception as e:
+        print(f"[lane_records] cache write error: {e}")
+
+    return payload
+
+
+def fetch_lane_permits(taxlot: str, force_refresh: bool = False) -> dict:
+    """Lane permits — branches by planning_jurisdiction_code.
+
+    Eugene (juris='EUG') → Eugene PDD portal (separate from state Accela; IN FLIGHT).
+    Springfield + smaller cities + unincorporated → Oregon state Accela via
+    fetch_county_permits with county_fips='039'.
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """SELECT planning_jurisdiction_code, incorporated_city_code,
+                          reference_full_address
+                   FROM parcels_lane WHERE taxlot = %s LIMIT 1""",
+                (taxlot,),
+            )
+            row = cur.fetchone()
+    except Exception as e:
+        return {"found": False, "reason": f"DB error: {e}", "taxlot": taxlot}
+
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_lane", "taxlot": taxlot}
+
+    juris = (row["planning_jurisdiction_code"] or "").upper()
+    incorp = (row["incorporated_city_code"] or "").upper()
+
+    if juris == "EUG" or incorp == "EUG":
+        return {
+            "found": True,
+            "from_cache": False,
+            "taxlot": taxlot,
+            "county_fips": "039",
+            "routed_via": "eugene_pdd",
+            "jurisdiction": "City of Eugene (PDD — separate from state Accela)",
+            "status": "deep_link_only",
+            "permit_count": 0,
+            "permits": [],
+            "deep_links": {
+                "eugene_pdd": _EUGENE_PDD_PERMITS,
+                "eugene_pdd_home": "https://www.eugene-or.gov/3360/Permits",
+            },
+            "in_flight": [
+                "Structured scrape of Eugene PDD permit portal — Eugene runs its own EnerGov-style permitting separate from the state Oregon Accela. Portal endpoint contract not captured this pass.",
+                "Until then: clicking the deep link lands the user on Eugene PDD's permit portal.",
+            ],
+            "fetched_at": _dt.now(_tz.utc).isoformat(),
+        }
+
+    result = fetch_county_permits(taxlot, "039", force_refresh)
+    if isinstance(result, dict):
+        result["routed_via"] = "oregon_state_accela"
+        if juris == "SPR" or incorp == "SPR":
+            result["jurisdiction"] = "City of Springfield (Oregon state Accela)"
+        else:
+            result["jurisdiction"] = f"Lane County unincorporated / small city (Oregon state Accela) — juris={juris or 'LAN'}"
+    return result
 
 
 # =============================================================================

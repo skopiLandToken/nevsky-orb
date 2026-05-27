@@ -45,6 +45,9 @@ from .orb_db import (
     fetch_marion_assessment,
     fetch_marion_records,
     fetch_marion_permits,
+    fetch_lane_assessment,
+    fetch_lane_records,
+    fetch_lane_permits,
     fetch_wash_assessment,
     fetch_wash_records,
     fetch_washington_permits,
@@ -93,6 +96,9 @@ TIER_TOOLS = {
         "fetch_marion_assessment",
         "fetch_marion_records",
         "fetch_marion_permits",
+        "fetch_lane_assessment",
+        "fetch_lane_records",
+        "fetch_lane_permits",
         "fetch_wash_assessment",
         "fetch_wash_records",
         "fetch_washington_permits",
@@ -121,6 +127,9 @@ TIER_TOOLS = {
         "fetch_marion_assessment",
         "fetch_marion_records",
         "fetch_marion_permits",
+        "fetch_lane_assessment",
+        "fetch_lane_records",
+        "fetch_lane_permits",
         "fetch_wash_assessment",
         "fetch_wash_records",
         "fetch_washington_permits",
@@ -390,6 +399,42 @@ ALL_TOOL_SCHEMAS = {
             "required": ["taxlot"]
         }
     },
+    "fetch_lane_assessment": {
+        "name": "fetch_lane_assessment",
+        "description": "TERRA: Fetch the Lane County assessment + property snapshot for a taxlot. Use when the user asks about a parcel in Eugene / Springfield / Florence / Cottage Grove / Junction City / unincorporated Lane — anywhere in the Eugene metro or Lane County proper. Lane is the RICHEST Tier 1 L1 — owner, situs, FULL valuation (RMV land + improvements + personal, AV, taxable, certified tax annual), zoning code + plan designation, planning jurisdiction (EUG/SPR/LAN), urban growth boundary, incorporated city, school + fire district, census tract, improvement type + year built + sqft, neighborhood association, market area, and plat are ALL native at L1 — no upstream fetch needed for the snapshot. IN FLIGHT — flag honestly: multi-year tax payment history + per-bill status live behind apps.lanecounty.org A&T detail (JS-rendered); RLID full property report is subscription-gated (deep link surfaces the property summary regardless). Use the rlid_property_report deep link as the canonical 'see more' hand-off. FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (👤 OWNER / 🏠 SITUS / 💰 VALUATION / 🏘️ ZONING & PLANNING / 🏗️ IMPROVEMENTS / 🌐 DISTRICTS / 🔗 DEEP LINKS). Surface valuation prominently — Lane gives us numbers Multnomah doesn't. End with the rlid_property_report link as the broker hand-off.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Full Lane taxlot ID (13-char maptaxlot format, e.g. '1704353200500')."},
+                "force_refresh": {"type": "boolean", "default": False, "description": "Bypass 24h cache and re-pull from parcels_lane."}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_lane_records": {
+        "name": "fetch_lane_records",
+        "description": "TERRA: Fetch Lane County recorded documents (deeds, mortgages, liens, sales chain) for a taxlot. CURRENTLY IN FLIGHT — Lane County Clerk recordings office has no public queryable API as of 2026-05-27; RLID consolidates these but full reports are subscription-gated. Returns the most-recent owner from parcels_lane L1 inline data plus the canonical RLID property-report deep link and Lane Clerk recordings homepage. Honest IN FLIGHT framing — open paths are (a) RLID paid tier, (b) paid Tyler integration, (c) per-deed Clerk export. FORMATTING: TERRA aesthetic. 📜 emoji header. Surface current owner from L1 prominently. Frame the IN FLIGHT honestly — 'full chain of title arrives once we wire one of the paid paths' — never apologize, never fabricate. End with the rlid_property_report deep link.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string"},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_lane_permits": {
+        "name": "fetch_lane_permits",
+        "description": "TERRA: Fetch building permits for a Lane County parcel. Routes by planning jurisdiction: Eugene-jurisdiction parcels (planning_jurisdiction_code='EUG') → Eugene PDD portal at eugene-or.gov (separate from state Accela; structured scrape IN FLIGHT, deep link surfaced); Springfield, smaller cities, and unincorporated Lane → Oregon state ePermitting Accela at aca-oregon.accela.com/oregon via fetch_county_permits with county_fips='039'. The function reads planning_jurisdiction_code from parcels_lane L1 and branches automatically. Use when the user asks about permits, building activity, development status on any Lane taxlot. Returns: routed_via='eugene_pdd' or 'oregon_state_accela', jurisdiction label, status (deep_link_only until scrape lands), permit_count, permits list, deep_links, in_flight notes. FORMATTING: TERRA aesthetic. 🚧 emoji header. Branch on routed_via — Eugene parcels frame as 'Eugene PDD has its own portal' with the PDD link; everything else frames as 'one tap from the live state portal' with the Accela link.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Full Lane taxlot ID (13-char maptaxlot)."},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot"]
+        }
+    },
     "fetch_wash_assessment": {
         "name": "fetch_wash_assessment",
         "description": "TERRA: Fetch the Washington County assessment + property snapshot for a taxlot. Use when the user asks about a parcel in Beaverton / Hillsboro / Tigard / Forest Grove / unincorporated Washington — anywhere west-of-Portland-metro. Returns acreage, map_number, taxlot_short, parcel centroid, live zoning code from the Intermap Land Use layer, plus verified deep links to the A&T portal (washcotax) and the official Washington County A&T page. IN FLIGHT — flag honestly: owner, situs, valuation snapshot, multi-year certified values, sales history, deed instruments, tax payment history all live behind washcotax.co.washington.or.us, which is DotNetNuke + ASP.NET WebForms with viewstate-gated TLNO → R-number resolution. Same fight as Crook's Accela scrape and Multnomah's MultcoPropTax — captcha-equivalent. Until the viewstate scrape or paid-tier lands, surface what we have (size + zoning + deep links) and frame the rest as 'coming soon — broker can click through.' FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (🌍 SIZE / 🏘️ ZONING / 📍 LOCATION / 🔗 DEEP LINKS). List IN FLIGHT items at end as 'coming soon' — never apologize. Always end with the at_search_by_taxlot deep link.",
@@ -490,6 +535,9 @@ LOCAL_TOOL_FUNCTIONS = {
     "fetch_marion_assessment": fetch_marion_assessment,
     "fetch_marion_records": fetch_marion_records,
     "fetch_marion_permits": fetch_marion_permits,
+    "fetch_lane_assessment": fetch_lane_assessment,
+    "fetch_lane_records": fetch_lane_records,
+    "fetch_lane_permits": fetch_lane_permits,
     "fetch_wash_assessment": fetch_wash_assessment,
     "fetch_wash_records": fetch_wash_records,
     "fetch_washington_permits": fetch_washington_permits,
