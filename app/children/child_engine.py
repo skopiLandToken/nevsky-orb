@@ -42,6 +42,9 @@ from .orb_db import (
     fetch_crook_assessment,
     fetch_crook_permits,
     fetch_county_permits,
+    fetch_wash_assessment,
+    fetch_wash_records,
+    fetch_washington_permits,
     query_yakov_handoffs,
     query_yakov_commits,
     calculate_lot_yield,
@@ -84,6 +87,9 @@ TIER_TOOLS = {
         "fetch_crook_assessment",
         "fetch_crook_permits",
         "fetch_county_permits",
+        "fetch_wash_assessment",
+        "fetch_wash_records",
+        "fetch_washington_permits",
         "query_yakov_handoffs",
         "query_yakov_commits",
         "calculate_lot_yield",
@@ -106,6 +112,9 @@ TIER_TOOLS = {
         "fetch_crook_assessment",
         "fetch_crook_permits",
         "fetch_county_permits",
+        "fetch_wash_assessment",
+        "fetch_wash_records",
+        "fetch_washington_permits",
         "calculate_lot_yield",
         "web_search",
     ],
@@ -325,7 +334,7 @@ ALL_TOOL_SCHEMAS = {
     },
     "fetch_county_permits": {
         "name": "fetch_county_permits",
-        "description": "TERRA: Fetch building permits for ANY Oregon county that participates in the state ePermitting portal (Accela ACA). Reusable across Crook (FIPS 013), Jefferson (031), Lane (039), and other participating counties — pass the county_fips alongside the taxlot. Counties NOT in the state system (Deschutes uses DIAL; Multnomah uses Portland Maps) return a structured 'not_applicable' response routing the caller to the county-native fetcher. Use this when handling permits for any non-Deschutes, non-Multnomah Oregon parcel. CURRENT STATUS — same as fetch_crook_permits: returns the verified Accela deep link, scrape upgrade IN FLIGHT. FORMATTING: TERRA aesthetic. 🚧 emoji header. Branch on status — 'deep_link_only' surfaces the link, 'not_applicable' redirects to the right county-native fetcher.",
+        "description": "TERRA: Fetch building permits for ANY Oregon county that participates in the state ePermitting portal (Accela ACA). Reusable across Crook (FIPS 013), Jefferson (031), Lane (039), and other participating counties — pass the county_fips alongside the taxlot. Counties NOT in the state system (Deschutes uses DIAL; Multnomah uses Portland Maps; Washington uses its OWN Accela instance — call fetch_washington_permits) return a structured 'not_applicable' response routing the caller to the county-native fetcher. Use this when handling permits for any non-Deschutes, non-Multnomah, non-Washington Oregon parcel. CURRENT STATUS — same as fetch_crook_permits: returns the verified Accela deep link, scrape upgrade IN FLIGHT. FORMATTING: TERRA aesthetic. 🚧 emoji header. Branch on status — 'deep_link_only' surfaces the link, 'not_applicable' redirects to the right county-native fetcher.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -334,6 +343,42 @@ ALL_TOOL_SCHEMAS = {
                 "force_refresh": {"type": "boolean", "default": False}
             },
             "required": ["taxlot", "county_fips"]
+        }
+    },
+    "fetch_wash_assessment": {
+        "name": "fetch_wash_assessment",
+        "description": "TERRA: Fetch the Washington County assessment + property snapshot for a taxlot. Use when the user asks about a parcel in Beaverton / Hillsboro / Tigard / Forest Grove / unincorporated Washington — anywhere west-of-Portland-metro. Returns acreage, map_number, taxlot_short, parcel centroid, live zoning code from the Intermap Land Use layer, plus verified deep links to the A&T portal (washcotax) and the official Washington County A&T page. IN FLIGHT — flag honestly: owner, situs, valuation snapshot, multi-year certified values, sales history, deed instruments, tax payment history all live behind washcotax.co.washington.or.us, which is DotNetNuke + ASP.NET WebForms with viewstate-gated TLNO → R-number resolution. Same fight as Crook's Accela scrape and Multnomah's MultcoPropTax — captcha-equivalent. Until the viewstate scrape or paid-tier lands, surface what we have (size + zoning + deep links) and frame the rest as 'coming soon — broker can click through.' FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (🌍 SIZE / 🏘️ ZONING / 📍 LOCATION / 🔗 DEEP LINKS). List IN FLIGHT items at end as 'coming soon' — never apologize. Always end with the at_search_by_taxlot deep link.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Full Washington taxlot ID (TLNO format, 12 chars, e.g. '1N3150002100')."},
+                "force_refresh": {"type": "boolean", "default": False, "description": "Bypass 24h cache and re-pull from parcels_washington + live zoning query."}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_wash_records": {
+        "name": "fetch_wash_records",
+        "description": "TERRA: Fetch Washington County recorded documents (deeds, mortgages, liens) for a taxlot. CURRENTLY IN FLIGHT — Washington County Clerk recordings live on a separate surface that requires paid-tier subscription, alternative source, or viewstate-captured washcotax search. Unlike Multnomah, Washington's bulk taxlot service does NOT ship deed/sale data inline, so there's no Layer-1 fallback — this fetcher returns IN FLIGHT plus the A&T search deep link and the County Clerk homepage. FORMATTING: TERRA aesthetic. 📜 emoji header. Frame the IN FLIGHT honestly — 'full chain of title coming once we wire the paid tier' — never apologize, never fabricate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string"},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_washington_permits": {
+        "name": "fetch_washington_permits",
+        "description": "TERRA: Fetch building permits for a Washington County parcel via Washington's OWN Accela ACA instance at permits.washingtoncountyor.gov. NOT a fetch_county_permits wrapper — Washington runs a county-direct Accela, distinct from the state oregon.gov Accela used by Crook/Jefferson/Lane. Same deep-link-only IN FLIGHT pattern: server-side scrape gated on viewstate-capture or Playwright. Use when the user asks about permits, building activity, or development status on a Beaverton / Hillsboro / Tigard / unincorporated Washington taxlot. JURISDICTION NOTE — Beaverton, Hillsboro, and Tigard run separate city permit systems; v1 only covers the county Accela. Per-city portal routing is IN FLIGHT. FORMATTING: TERRA aesthetic. 🚧 emoji header. Frame the deep link as 'one tap from the live county portal.' Surface the jurisdiction note so brokers know city-level data may live elsewhere.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Full Washington taxlot ID (TLNO format)."},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot"]
         }
     },
     "calculate_lot_yield": {
@@ -397,6 +442,9 @@ LOCAL_TOOL_FUNCTIONS = {
     "fetch_crook_assessment": fetch_crook_assessment,
     "fetch_crook_permits": fetch_crook_permits,
     "fetch_county_permits": fetch_county_permits,
+    "fetch_wash_assessment": fetch_wash_assessment,
+    "fetch_wash_records": fetch_wash_records,
+    "fetch_washington_permits": fetch_washington_permits,
     "get_site_plans": get_site_plans,
     "get_ai_spend_today": get_ai_spend_today,
     "query_yakov_handoffs": query_yakov_handoffs,

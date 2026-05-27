@@ -337,6 +337,35 @@ COUNTY_REGISTRY = {
             LIMIT 1
         """,
     },
+    "067": {  # Washington (FIPS 41-067) — Tier 1 Flagship, Portland metro westside
+        "name": "Washington",
+        # bbox: covers Beaverton + Hillsboro + Tigard + Forest Grove + unincorporated, padded
+        # slightly outside the actual county boundary so edge parcels don't fall through.
+        "bbox": (45.30, 45.85, -123.50, -122.60),
+        "query": """
+            SELECT taxlot,
+                   map_number AS section_id,
+                   ROUND((shape_area / 43560.0)::numeric, 3) AS acres,
+                   -- A&T portal search-by-TLNO landing. Captcha-free landing page; the
+                   -- viewstate POST to resolve TLNO → R-number is the IN FLIGHT piece.
+                   ('https://washcotax.co.washington.or.us/Property-Search-Result/searchtext='
+                       || taxlot) AS county_url,
+                   map_number,
+                   -- Washington L1 ships only TLNO + MAPNO + geom. Owner, situs, zoning
+                   -- are all behind the A&T portal / Intermap zoning layer and resolved
+                   -- on-demand by fetch_wash_assessment.
+                   NULL::text AS owner_name,
+                   NULL::text AS situs_address,
+                   NULL::text AS zone_code,
+                   NULL::text AS zone_label,
+                   ST_AsText(ST_Centroid(geom)) AS parcel_centroid,
+                   'Washington'::text AS county_name,
+                   '067'::text AS county_fips
+            FROM parcels_washington
+            WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            LIMIT 1
+        """,
+    },
     # Jefferson (031) and Lane (039) entries land here when their L1 tables exist.
 }
 
@@ -1373,6 +1402,358 @@ def fetch_multnomah_permits(taxlot: str, force_refresh: bool = False) -> dict:
         ),
         "fetched_at": _dt.now(_tz.utc).isoformat(),
     }
+
+
+# =============================================================================
+# WASHINGTON Layer 2 + Layer 3 Fetchers
+# =============================================================================
+# Reality check (2026-05-27, s3 Yindo session): Washington's public taxlot service
+# is the OPPOSITE of Multnomah's — it ships ONLY TLNO/MAPNO/geometry. No inline
+# owner / situs / valuation / sale / zoning. Rich data lives behind the A&T portal
+# at washcotax.co.washington.or.us, which is DotNetNuke + ASP.NET WebForms with
+# viewstate gating (same fight that lost s1's Accela scrape and s2's MultcoPropTax
+# scrape).
+#
+# What works: (a) zoning lookup via Intermap/Land_Use/MapServer/8 (spatial query
+# against the County Land Use Districts polygon layer — LUD field = zone code).
+# (b) verified deep links to washcotax search-by-TLNO landing and the official
+# A&T page. Owner / valuation / sale / tax history flagged IN FLIGHT pending
+# viewstate capture or paid-tier authorization.
+#
+# Permits: Washington County uses its OWN Accela instance at
+# permits.washingtoncountyor.gov, distinct from the state oregon.gov Accela
+# (aca-oregon.accela.com) that handles Crook + Jefferson + Lane. So
+# fetch_washington_permits is NOT a fetch_county_permits wrapper — it points
+# to the county-direct portal with the same deep-link-only IN FLIGHT pattern.
+# =============================================================================
+
+_WASH_CACHE_TTL_HOURS = 24
+_WASH_LAND_USE_URL = (
+    "https://gispub.co.washington.or.us/server/rest/services/"
+    "Intermap/Land_Use/MapServer/8/query"
+)
+_WASH_AT_BASE = "https://washcotax.co.washington.or.us"
+_WASH_PERMITS_BASE = "https://permits.washingtoncountyor.gov"
+_WASH_PERMITS_SEARCH = f"{_WASH_PERMITS_BASE}/CitizenAccess/Cap/CapHome.aspx?module=Building"
+
+
+def _wash_lookup_zoning(taxlot: str) -> dict:
+    """Spatial query against Intermap/Land_Use/MapServer/8 for the zone at the
+    parcel's centroid. Returns {zone_code, source_url} or {zone_code: None}.
+
+    Layer 8 ships only LUD (Plan/zone code, 10-char). No zoning description.
+    Zone names map: AF-5/AF-10/AF-20 = Agriculture-Forest, R-* = residential
+    densities, etc. — broker can interpret from the code; deep label lookup
+    is deferred to a future zoning-dictionary join.
+    """
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """SELECT ST_X(ST_Centroid(geom)) AS lon, ST_Y(ST_Centroid(geom)) AS lat
+                   FROM parcels_washington WHERE taxlot = %s LIMIT 1""",
+                (taxlot,),
+            )
+            row = cur.fetchone()
+    except Exception as e:
+        return {"zone_code": None, "error": f"DB: {e}"}
+
+    if not row or row["lon"] is None:
+        return {"zone_code": None, "error": "no centroid"}
+
+    # Build esriGeometry point in WGS84; Land_Use service is in WKID 2913 but
+    # accepts inSR=4326 + datum transform on the server side.
+    geom_param = _json.dumps({
+        "x": float(row["lon"]), "y": float(row["lat"]),
+        "spatialReference": {"wkid": 4326},
+    })
+    params = {
+        "where": "1=1",
+        "geometry": geom_param,
+        "geometryType": "esriGeometryPoint",
+        "inSR": "4326",
+        "spatialRel": "esriSpatialRelIntersects",
+        "outFields": "LUD",
+        "returnGeometry": "false",
+        "f": "json",
+    }
+    try:
+        with _httpx.Client(timeout=15.0, headers={"User-Agent": _DIAL_USER_AGENT}) as c:
+            r = c.get(_WASH_LAND_USE_URL, params=params)
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        return {"zone_code": None, "error": f"HTTP: {e}"}
+
+    features = data.get("features", []) or []
+    if not features:
+        return {"zone_code": None, "source_url": _WASH_LAND_USE_URL}
+    attrs = features[0].get("attributes", {}) or {}
+    return {
+        "zone_code": (attrs.get("LUD") or "").strip() or None,
+        "source_url": _WASH_LAND_USE_URL,
+    }
+
+
+def fetch_wash_assessment(taxlot: str, force_refresh: bool = False) -> dict:
+    """Washington County assessment + property snapshot for a taxlot.
+
+    Built on parcels_washington Layer 1 (geometry-derived acreage, taxlot, map_number)
+    + a live spatial query against the Intermap Land Use layer for the zone code,
+    plus verified deep links to the A&T portal. Owner, situs, valuation, sale, and
+    tax payment history are IN FLIGHT pending viewstate-capture or paid-tier
+    authorization for washcotax.co.washington.or.us.
+
+    Returns: {found, taxlot, map_number, snapshot{size,zoning,jurisdiction_hints},
+              deep_links{at_search,at_homepage}, in_flight[], fetched_at, from_cache}
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    # Cache check
+    if not force_refresh:
+        try:
+            with _conn() as cn, cn.cursor() as cur:
+                cur.execute(
+                    "SELECT taxlot, r_number, payload_json, fetched_at, last_error "
+                    "FROM wash_assessment_cache WHERE taxlot = %s",
+                    (taxlot,),
+                )
+                cached = cur.fetchone()
+                if cached:
+                    age = _dt.now(_tz.utc) - cached["fetched_at"]
+                    if age < _td(hours=_WASH_CACHE_TTL_HOURS) and cached["payload_json"]:
+                        payload = cached["payload_json"]
+                        payload["from_cache"] = True
+                        payload["cached_age_hours"] = round(age.total_seconds() / 3600, 1)
+                        return payload
+        except Exception as e:
+            print(f"[wash_assessment] cache read error: {e}")
+
+    # Pull from Layer 1
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """SELECT taxlot, map_number, taxlot_short,
+                          ROUND((shape_area / 43560.0)::numeric, 3) AS acres,
+                          ST_AsText(ST_Centroid(geom)) AS centroid
+                   FROM parcels_washington WHERE taxlot = %s LIMIT 1""",
+                (taxlot,),
+            )
+            row = cur.fetchone()
+    except Exception as e:
+        return {"found": False, "reason": f"DB error: {e}", "taxlot": taxlot}
+
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_washington", "taxlot": taxlot}
+
+    # Live zoning query — non-blocking, return None on failure
+    zoning = _wash_lookup_zoning(taxlot)
+
+    at_search_url = f"{_WASH_AT_BASE}/Property-Search-Result/searchtext={taxlot}"
+    at_home_url = "https://www.washingtoncountyor.gov/at"
+
+    payload = {
+        "found": True,
+        "from_cache": False,
+        "taxlot": row["taxlot"],
+        "map_number": row["map_number"],
+        "taxlot_short": row["taxlot_short"],
+        "snapshot": {
+            "size": {
+                "acres": float(row["acres"]) if row["acres"] is not None else None,
+            },
+            "zoning": {
+                "zone_code": zoning.get("zone_code"),
+                "source": "Intermap/Land_Use/MapServer/8 (live spatial query)" if zoning.get("zone_code") else None,
+            },
+            "location": {
+                "centroid_wkt": row["centroid"],
+            },
+        },
+        "deep_links": {
+            "at_search_by_taxlot": at_search_url,
+            "at_homepage": at_home_url,
+        },
+        "in_flight": [
+            "owner_of_record + mailing_address (washcotax.co.washington.or.us is DNN + ASP.NET WebForms with viewstate-gated TLNO → R-number resolution).",
+            "situs_address (same source).",
+            "valuation snapshot (land/improvement/assessed) + multi-year certified values (same source).",
+            "sales history + deed instruments (same source — also a 'Records' surface to confirm via fetch_wash_records).",
+            "tax payment history + current bill status (same source).",
+        ],
+        "source": "parcels_washington Layer 1 + Intermap zoning layer",
+        "source_url": at_search_url,
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+    # Cache write
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO wash_assessment_cache (taxlot, r_number, payload_json, fetched_at, last_error)
+                   VALUES (%s, NULL, %s::jsonb, NOW(), NULL)
+                   ON CONFLICT (taxlot) DO UPDATE SET
+                       payload_json = EXCLUDED.payload_json,
+                       fetched_at = NOW(),
+                       last_error = NULL""",
+                (taxlot, _json.dumps(payload, default=str)),
+            )
+            cn.commit()
+    except Exception as e:
+        print(f"[wash_assessment] cache write error: {e}")
+
+    return payload
+
+
+def fetch_wash_records(taxlot: str, force_refresh: bool = False) -> dict:
+    """Washington County recorded documents (deeds, mortgages, liens).
+
+    IN FLIGHT — Washington County Clerk recordings live on a separate surface
+    that requires either subscription access or a paid tier. Best-available
+    most-recent-instrument data is NOT inline in parcels_washington (unlike
+    Multnomah where the bulk taxlot service ships deed_type/date/instrument).
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    # Confirm taxlot exists in L1 before claiming the IN FLIGHT
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                "SELECT taxlot FROM parcels_washington WHERE taxlot = %s LIMIT 1",
+                (taxlot,),
+            )
+            row = cur.fetchone()
+    except Exception as e:
+        return {"found": False, "reason": f"DB error: {e}", "taxlot": taxlot}
+
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_washington", "taxlot": taxlot}
+
+    return {
+        "found": True,
+        "in_flight": True,
+        "taxlot": row["taxlot"],
+        "best_available_from_layer_1": {
+            # Washington L1 ships nothing about deeds/owners — explicitly empty.
+            "note": "Washington's bulk taxlot service does NOT ship deed/sale data inline (only TLNO + MAPNO + geom). Use fetch_wash_assessment for the size+zoning snapshot; deed chain is fully IN FLIGHT.",
+        },
+        "in_flight_reason": (
+            "Washington County recorded documents (Clerk recordings) live on a separate "
+            "surface that requires either paid-tier subscription, alternative source, "
+            "or viewstate-captured washcotax search. Pending Iosif decision on which "
+            "path to take — same blocker as fetch_multco_records."
+        ),
+        "deep_links": {
+            "at_search_by_taxlot": f"{_WASH_AT_BASE}/Property-Search-Result/searchtext={taxlot}",
+            "county_clerk_homepage": "https://www.washingtoncountyor.gov/recording",
+        },
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+
+def fetch_washington_permits(taxlot: str, force_refresh: bool = False) -> dict:
+    """Building permits for a Washington County parcel.
+
+    Washington runs its OWN Accela ACA instance at permits.washingtoncountyor.gov
+    (distinct from the state oregon.gov Accela used by Crook/Jefferson/Lane via
+    fetch_county_permits). Same deep-link-only IN FLIGHT pattern: a verified
+    Accela search URL is returned, scrape upgrade gated on viewstate-capture
+    or Playwright. Cache table is sized for the eventual real payload so the
+    upgrade drops in without schema change.
+
+    Jurisdiction routing: Beaverton / Hillsboro / Tigard cities have their own
+    portals; permits.washingtoncountyor.gov covers unincorporated + many smaller
+    jurisdictions. v1 surfaces the county Accela deep link; per-city portal
+    routing is IN FLIGHT pending Iosif validation of the county-direct path.
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    # Cache check
+    if not force_refresh:
+        try:
+            with _conn() as cn, cn.cursor() as cur:
+                cur.execute(
+                    "SELECT taxlot, jurisdiction, permits_json, permit_count, aca_search_url, "
+                    "fetched_at, last_error FROM wash_permits_cache WHERE taxlot = %s",
+                    (taxlot,),
+                )
+                cached = cur.fetchone()
+                if cached:
+                    age = _dt.now(_tz.utc) - cached["fetched_at"]
+                    if age < _td(hours=_WASH_CACHE_TTL_HOURS):
+                        return {
+                            "found": True,
+                            "from_cache": True,
+                            "cached_age_hours": round(age.total_seconds() / 3600, 1),
+                            "taxlot": taxlot,
+                            "jurisdiction": cached["jurisdiction"],
+                            "status": "deep_link_only",
+                            "permit_count": cached["permit_count"],
+                            "permits": cached["permits_json"] or [],
+                            "deep_links": {"accela_search": cached["aca_search_url"]},
+                            "in_flight": [
+                                "Server-side scrape of the county Accela result page — gated on viewstate capture or Playwright.",
+                                "Per-city portal routing (Beaverton/Hillsboro/Tigard) for parcels inside those city limits.",
+                            ],
+                            "fetched_at": cached["fetched_at"].isoformat(),
+                        }
+        except Exception as e:
+            print(f"[wash_permits] cache read error: {e}")
+
+    # Confirm taxlot exists in L1
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                "SELECT taxlot FROM parcels_washington WHERE taxlot = %s LIMIT 1",
+                (taxlot,),
+            )
+            row = cur.fetchone()
+    except Exception as e:
+        return {"found": False, "reason": f"DB error: {e}", "taxlot": taxlot}
+
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_washington", "taxlot": taxlot}
+
+    payload = {
+        "found": True,
+        "from_cache": False,
+        "taxlot": taxlot,
+        "jurisdiction": "Washington County (county-direct Accela)",
+        "status": "deep_link_only",
+        "permit_count": 0,
+        "permits": [],
+        "deep_links": {"accela_search": _WASH_PERMITS_SEARCH},
+        "in_flight": [
+            "Server-side scrape of the county Accela result page — gated on viewstate capture or Playwright (same blocker as fetch_county_permits for the state portal).",
+            "Per-city portal routing — Beaverton / Hillsboro / Tigard run separate city permit systems; v1 only covers the county Accela.",
+            "Until the scrape lands: clicking the deep link drops the user on the county's Accela search where pasting the taxlot returns the live list in one search submit.",
+        ],
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+    # Cache write
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO wash_permits_cache (taxlot, jurisdiction, permits_json, permit_count, aca_search_url, fetched_at, last_error)
+                   VALUES (%s, %s, '[]'::jsonb, 0, %s, NOW(), NULL)
+                   ON CONFLICT (taxlot) DO UPDATE SET
+                       jurisdiction = EXCLUDED.jurisdiction,
+                       aca_search_url = EXCLUDED.aca_search_url,
+                       fetched_at = NOW(),
+                       last_error = NULL""",
+                (taxlot, payload["jurisdiction"], _WASH_PERMITS_SEARCH),
+            )
+            cn.commit()
+    except Exception as e:
+        print(f"[wash_permits] cache write error: {e}")
+
+    return payload
 
 
 # =============================================================================

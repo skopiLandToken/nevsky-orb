@@ -1,0 +1,47 @@
+{
+  "instance": "yakov-droplet-s3",
+  "summary": "Washington County (FIPS 067) ships end-to-end in TERRA: Layer 1 (200,345 parcels ingested in 178s, COUNTY_REGISTRY entry added, multi-county dispatch verified across 4 counties = 608,831 parcels under TERRA), Layer 2 (fetch_wash_assessment with live zoning spatial query against Intermap returns EFU on rural unincorporated, IN FLIGHT for owner/valuation/sale/tax behind washcotax viewstate gate; fetch_wash_records IN FLIGHT stub with deep links), and Layer 3 (fetch_washington_permits deep-link-only pattern lifted from fetch_county_permits but pointed at Washington's OWN Accela instance at permits.washingtoncountyor.gov, not the state portal). One clean commit. All 8 smoke tests PASS — pin-drop verified at Tigard City Hall (direct hit) + Hillsboro Civic (direct hit) + Beaverton City Hall (correctly on ROW between residential parcels at sub-meter distance), cache hit at 20ms, regression verified for Deschutes/Crook/Multnomah/Washington. Tier 1 Flagship #2 complete after Multnomah which s2 shipped at 015e31a earlier today.",
+  "high_impact": true,
+  "changes": [
+    {
+      "type": "feature",
+      "description": "Washington County Layer 1: 200,345 parcels ingested from gispub.co.washington.or.us AT_Cartog/Washington_County_Addresses_and_Taxlots/MapServer/1 (178s wall time, 0 skipped, 200,106 unique TLNOs across 2,544 map sheets covering ~695 sq mi). COUNTY_REGISTRY now serves 4 counties (Deschutes 017, Crook 013, Multnomah 051, Washington 067) = 608,831 parcels indexed. Washington L1 schema is the OPPOSITE of Multnomah — ships only TLNO+MAPNO+TLNO5+geometry, no inline owner/situs/valuation/sale/zoning (those live behind the washcotax viewstate-gated A&T portal).",
+      "files": [
+        "migrations/2026-05-27_parcels_washington.sql",
+        "app/scripts/ingest_washington_parcels.py",
+        "app/children/orb_db.py"
+      ],
+      "commits": ["pending-this-session"]
+    },
+    {
+      "type": "feature",
+      "description": "Washington Layer 2 + Layer 3 fetchers. fetch_wash_assessment returns size + live zoning code (spatial query against Intermap/Land_Use/MapServer/8 — verified EFU returned on a rural unincorporated parcel; null on incorporated cities which is correct since that layer is unincorporated-only) + verified A&T deep links + IN FLIGHT items for owner/valuation/sale/tax/records. fetch_wash_records is an IN FLIGHT stub with verified deep links (no L1 fallback because Washington's bulk taxlot service does NOT ship deed/sale data inline). fetch_washington_permits is a SEPARATE function from fetch_county_permits — Washington runs its OWN Accela instance at permits.washingtoncountyor.gov, distinct from the state oregon.gov Accela that handles Crook/Jefferson/Lane. Same deep-link-only IN FLIGHT pattern. _OREGON_EPERMITTING_FIPS was intentionally NOT updated with 067.",
+      "files": [
+        "migrations/2026-05-27_washington_layer2_caches.sql",
+        "app/children/orb_db.py",
+        "app/children/child_engine.py"
+      ],
+      "commits": ["pending-this-session"]
+    },
+    {
+      "type": "schema",
+      "description": "Four new tables: parcels_washington (200K-row taxlot table with GIST + taxlot + map_number indexes), wash_assessment_cache (taxlot PK + r_number + jsonb payload, 24h TTL), wash_records_cache (taxlot PK + jsonb documents, 24h TTL), wash_permits_cache (taxlot PK + jurisdiction + jsonb + accela_search_url, 24h TTL). All follow the multco_*_cache pattern from s2's Multnomah ship. No changes to existing tables; no cross-county coupling.",
+      "files": [
+        "migrations/2026-05-27_parcels_washington.sql",
+        "migrations/2026-05-27_washington_layer2_caches.sql"
+      ]
+    }
+  ],
+  "next_session_priorities": [
+    "Decide washcotax viewstate path. Same blocker as Multnomah's MultcoPropTax and Crook's Accela scrape. Options: (a) Playwright in container, (b) byte-for-byte browser viewstate capture, (c) paid Tyler PA tier, (d) accept permanent IN FLIGHT. Affects completing fetch_wash_assessment payload (owner/valuation/sale/tax) and fetch_wash_records. Iosif decision needed.",
+    "Decide County Clerk recordings source. NETROnline / Doxpop subscription is the most common path for Oregon counties without open recording APIs (~$30-50/month per county). Carry-forward blocker for TASK-TERRA-DEEDS-01 across every county that doesn't ship deeds in its bulk service. Iosif decision needed.",
+    "Clackamas County (FIPS 005) Layer 1 — next Tier 1 Flagship, also Portland metro. Likely matches Washington's split (thin GIS + viewstate-gated A&T + county-direct Accela). Recon target: gispub.co.clackamas.us. Reuse wash_*_cache pattern field-for-field.",
+    "Marion County (FIPS 047) — s2 is currently building this in parallel. Marion is Salem metro, Tier 2. Watch s2's commit before adding any new shared-file edits to orb_db.py.",
+    "DOCTRINE-CLOSER-TERRITORY-LOAD-GATE — Washington Metro (12 slots) is now openable per the gate. Iosif's call on whether to open."
+  ],
+  "doctrine_notes": [
+    "DOCTRINE-HONEST-IN-FLIGHT-01 reinforced again — when an upstream source is gated behind viewstate or captcha, ship the fetcher with structured 'in_flight' labels in the return payload plus a verified deep link, NOT a silently-broken scraper. Cache table is sized for the eventual real payload so the upgrade drops in without schema change.",
+    "DOCTRINE-COUNTY-REGISTRY-01 applied cleanly — Washington was a one-entry append to COUNTY_REGISTRY in orb_db.py. NULL::text used for fields not in L1 (owner/situs/zoning, all deferred to L2 on-demand). The dispatch function did not need to change."
+  ],
+  "commits_this_session": []
+}
