@@ -366,6 +366,29 @@ COUNTY_REGISTRY = {
             LIMIT 1
         """,
     },
+    "047": {  # Marion (FIPS 41-047) — Tier 1 Flagship, Salem state capital
+        "name": "Marion",
+        # bbox: covers Salem + Keizer + Stayton + Aumsville + Silverton + Mt Angel + unincorporated.
+        # Marion sits south of Multnomah/Clackamas, north of Linn; padded slightly.
+        "bbox": (44.65, 45.45, -123.30, -122.20),
+        "query": """
+            SELECT taxlot,
+                   LEFT(taxlot, 6) AS section_id,
+                   ROUND(acres::numeric, 3) AS acres,
+                   reflink AS county_url,
+                   LEFT(taxlot, 6) AS map_number,
+                   owner_name,
+                   situs_address,
+                   zone_code,
+                   COALESCE(zone_code || ' / ' || zone_auth, zone_code) AS zone_label,
+                   ST_AsText(ST_Centroid(geom)) AS parcel_centroid,
+                   'Marion'::text AS county_name,
+                   '047'::text AS county_fips
+            FROM parcels_marion
+            WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            LIMIT 1
+        """,
+    },
     # Jefferson (031) and Lane (039) entries land here when their L1 tables exist.
 }
 
@@ -908,6 +931,10 @@ _OREGON_EPERMITTING_FIPS = {
     "013",  # Crook        — confirmed via co.crook.or.us/commdev FAQ
     "031",  # Jefferson    — historically participates; verify per-build
     "039",  # Lane         — partial; participates for some jurisdictions
+    "047",  # Marion       — confirmed via the Marion County PublicWorksPermits GIS
+            #                service (gis.co.marion.or.us/.../PublicWorksPermits) whose
+            #                description states permits are "as entered in Accela"; the
+            #                aca-oregon.accela.com /oregon module exposes Marion permits.
     # Deschutes (017) does NOT participate — uses DIAL natively. Multnomah (051)
     # has its own permit system (Portland Maps for COP parcels). Add new FIPS
     # codes here only after confirming via the BCD jurisdiction lookup.
@@ -1025,6 +1052,233 @@ def fetch_county_permits(taxlot: str, county_fips: str, force_refresh: bool = Fa
 def fetch_crook_permits(taxlot: str, force_refresh: bool = False) -> dict:
     """Convenience wrapper around fetch_county_permits for Crook (FIPS 013)."""
     return fetch_county_permits(taxlot, "013", force_refresh)
+
+
+# =============================================================================
+# MARION Layer 2 + Layer 3 Fetchers
+# =============================================================================
+# Design choice (2026-05-27, s1 Yindo session): Marion's bulk Parcels MapServer
+# already exposes ownership, situs, current valuation (RMV land/imp/total + assessed),
+# zoning (code + authority + URL), latest deed snapshot (instrument number/type/date,
+# sale price), property class, building metrics, and verified deep links to MCASR
+# and the tax-map PDF. That's everything the Layer-2 fetcher would normally pull
+# from an external portal — and it's present in parcels_marion as of the most
+# recent ingest. So fetch_marion_assessment and fetch_marion_records are SQL
+# pass-throughs over L1 inline data with NO external HTTP fetch (and therefore no
+# L2 cache table — L1 itself is the cache, refreshed by the daily delta job).
+#
+# What's IN FLIGHT:
+#   - Multi-year tax payment history → MCASR PropertySummary is ASP.NET WebForms
+#     with __VIEWSTATE-gated data on the initial GET. Same scrape-gating issue we
+#     hit on the Crook PSO portal. Deep link to PropertySummary is returned for
+#     the user to click through.
+#   - Full deed chain (multi-instrument history) → Marion Clerk Recordings public
+#     portal URL not yet located; only the latest instrument is in L1. Brief listed
+#     the Clerk recordings portal as "verify during recon" and we surface a
+#     pointer to the Clerk's office page instead.
+#
+# Permits (Layer 3): Marion participates in Oregon ePermitting via the same
+# aca-oregon.accela.com portal as Crook (confirmed via the Marion PublicWorksPermits
+# GIS service whose own metadata names Accela as the source-of-record). So Marion
+# only needs the convenience wrapper around fetch_county_permits — no Marion-specific
+# scraper code. The richer alternative is to spatially intersect parcels_marion.geom
+# vs the public Public/PublicWorksPermits/MapServer/0 + /1 point layers, which is
+# queued as the Layer-3 upgrade once a daily-poll permits worker lands.
+# =============================================================================
+
+_MARION_ASSESSOR_BASE = "https://mcasr.co.marion.or.us"
+_MARION_CLERK_RECORDS_PAGE = "https://www.co.marion.or.us/CO/Clerk/Pages/Recordings.aspx"
+
+
+def _marion_l1_row(taxlot: str):
+    """Fetch the L1 row for a Marion taxlot. Returns dict or None."""
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT taxlot, county_fips, taxacct, alt_taxacct,
+                       owner_name, owner_addr, owner_csz,
+                       situs_address, situs_csz,
+                       plat_name, block, lot, acres,
+                       inst_num, inst_type, inst_date, sale_price,
+                       zone_code, zone_auth, zone_web,
+                       year_built, bldg_area, living_area,
+                       prop_class, prp_cls_desc,
+                       rmv_land, rmv_imp, rmv_total, assd_val,
+                       tax_code, city, school_dist, fire_dist,
+                       reflink, maplink,
+                       ingested_at, last_modified
+                FROM parcels_marion WHERE taxlot = %s LIMIT 1
+                """,
+                (taxlot,),
+            )
+            return cur.fetchone()
+    except Exception as e:
+        print(f"[marion_l1_row] DB error: {e}")
+        return None
+
+
+def fetch_marion_assessment(taxlot: str, force_refresh: bool = False) -> dict:
+    """Marion assessment + ownership snapshot for a taxlot.
+
+    Pass-through over parcels_marion Layer 1 inline data (no external HTTP). Returns
+    owner / situs / zoning / acreage / current valuation (real-market + assessed) /
+    building metrics / property class + tax routing, plus verified deep links to
+    MCASR PropertySummary and the assessor tax-map PDF.
+
+    Multi-year tax payment history is IN FLIGHT — MCASR's PropertySummary.aspx is
+    ASP.NET WebForms with __VIEWSTATE-gated rendering on the initial GET; the
+    deep link returns the user to a single-tap landing page that surfaces the
+    full history once they click through.
+
+    Returns: {found, taxlot, county_fips, snapshot{owner, situs, zoning, valuation,
+              account, acreage, building}, deep_links{mcasr_property, tax_map_pdf,
+              zoning_authority}, in_flight[], fetched_at, source}
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    row = _marion_l1_row(taxlot)
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_marion", "taxlot": taxlot}
+
+    return {
+        "found": True,
+        "from_cache": False,
+        "taxlot": row["taxlot"],
+        "county_fips": row["county_fips"],
+        "source": "parcels_marion L1 inline (MC-ASR / MC-IT GIS) + MCASR deep links",
+        "snapshot": {
+            "owner": {
+                "primary": row["owner_name"],
+                "mailing_address": row["owner_addr"],
+                "mailing_csz": row["owner_csz"],
+            },
+            "situs": {
+                "address": row["situs_address"],
+                "city_state_zip": row["situs_csz"],
+            },
+            "account": {
+                "taxacct": row["taxacct"],
+                "alt_taxacct": row["alt_taxacct"],
+                "prop_class": row["prop_class"],
+                "pc_desc": row["prp_cls_desc"],
+                "tax_code": row["tax_code"],
+                "city": row["city"],
+                "school_district": row["school_dist"],
+                "fire_district": row["fire_dist"],
+            },
+            "zoning": {
+                "code": row["zone_code"],
+                "authority": row["zone_auth"],
+                "web": row["zone_web"],
+            },
+            "acreage": {
+                "acres": float(row["acres"]) if row["acres"] is not None else None,
+            },
+            "valuation": {
+                "rmv_land": row["rmv_land"],
+                "rmv_improvement": row["rmv_imp"],
+                "rmv_total": row["rmv_total"],
+                "assessed_value": row["assd_val"],
+            },
+            "building": {
+                "year_built": row["year_built"] if row["year_built"] else None,
+                "building_area_sqft": row["bldg_area"],
+                "living_area_sqft": row["living_area"],
+            },
+            "subdivision": {
+                "plat_name": row["plat_name"],
+                "block": row["block"],
+                "lot": row["lot"],
+            } if row["plat_name"] else None,
+        },
+        "deep_links": {
+            "mcasr_property": row["reflink"],
+            "tax_map_pdf":    row["maplink"],
+            "zoning_authority": row["zone_web"],
+        },
+        "in_flight": [
+            "Multi-year tax payment history — MCASR PropertySummary.aspx is ASP.NET WebForms with __VIEWSTATE-gated data on the initial GET. Deep link above lands the user one tap from the live history.",
+        ],
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+        "l1_ingested_at": row["ingested_at"].isoformat() if row["ingested_at"] else None,
+        "l1_last_modified": row["last_modified"].isoformat() if row["last_modified"] else None,
+    }
+
+
+def fetch_marion_records(taxlot: str, force_refresh: bool = False) -> dict:
+    """Marion deed / recorded-instrument snapshot for a taxlot.
+
+    Pass-through over parcels_marion Layer 1 inline data (no external HTTP). Returns
+    the MOST-RECENT instrument-of-record on the parcel (number, type, date, sale
+    price), the current owner of record, and a deep link to the Marion Clerk's
+    Recordings page where the user can search the full document history.
+
+    Full deed chain (multi-instrument history) is IN FLIGHT — Marion Clerk's
+    public recordings portal URL is not yet located (the standalone
+    recordings.co.marion.or.us / landmark.co.marion.or.us / land.co.marion.or.us
+    DNS endpoints all 404 on direct probe; the Clerk's office page is the
+    pointer the brief recommended until the portal URL is confirmed).
+
+    Returns: {found, taxlot, county_fips, latest_instrument, owner_of_record,
+              deep_links{clerk_recordings, mcasr_property}, in_flight[],
+              fetched_at, source}
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    row = _marion_l1_row(taxlot)
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_marion", "taxlot": taxlot}
+
+    has_instrument = bool(row["inst_num"] or row["inst_date"] or row["sale_price"])
+
+    return {
+        "found": True,
+        "from_cache": False,
+        "taxlot": row["taxlot"],
+        "county_fips": row["county_fips"],
+        "source": "parcels_marion L1 inline (MC-ASR / MC-IT GIS) + Marion Clerk deep link",
+        "latest_instrument": {
+            "number": row["inst_num"] or None,
+            "type":   row["inst_type"] or None,
+            "date":   row["inst_date"].isoformat() if row["inst_date"] else None,
+            "sale_price": row["sale_price"] if row["sale_price"] else None,
+        } if has_instrument else None,
+        "owner_of_record": {
+            "primary": row["owner_name"],
+            "mailing_address": row["owner_addr"],
+            "mailing_csz": row["owner_csz"],
+        },
+        "deep_links": {
+            "clerk_recordings": _MARION_CLERK_RECORDS_PAGE,
+            "mcasr_property":   row["reflink"],
+        },
+        "in_flight": [
+            "Multi-instrument deed chain — Marion Clerk's public recordings portal URL not yet located. Currently surfacing the Clerk office landing page; a single search on owner or property ID returns the full chain.",
+        ],
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+        "l1_ingested_at": row["ingested_at"].isoformat() if row["ingested_at"] else None,
+    }
+
+
+def fetch_marion_permits(taxlot: str, force_refresh: bool = False) -> dict:
+    """Convenience wrapper around fetch_county_permits for Marion (FIPS 047).
+
+    Marion participates in Oregon's state ePermitting portal (aca-oregon.accela.com)
+    — confirmed via the Marion PublicWorksPermits GIS service whose own metadata
+    names Accela as the source-of-record. This wrapper delegates to the shared
+    Accela handler with county_fips='047' pre-set.
+
+    Future upgrade path: Marion ALSO publishes the same permit data as point
+    geometry via Public/PublicWorksPermits/MapServer/{0,1}. A spatial-intersect
+    fetcher against parcels_marion.geom would give us live per-parcel permit lists
+    without any Accela scrape — queued as the Layer-3 upgrade and noted in KB_80.
+    """
+    return fetch_county_permits(taxlot, "047", force_refresh)
 
 
 # =============================================================================

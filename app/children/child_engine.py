@@ -42,6 +42,9 @@ from .orb_db import (
     fetch_crook_assessment,
     fetch_crook_permits,
     fetch_county_permits,
+    fetch_marion_assessment,
+    fetch_marion_records,
+    fetch_marion_permits,
     fetch_wash_assessment,
     fetch_wash_records,
     fetch_washington_permits,
@@ -87,6 +90,9 @@ TIER_TOOLS = {
         "fetch_crook_assessment",
         "fetch_crook_permits",
         "fetch_county_permits",
+        "fetch_marion_assessment",
+        "fetch_marion_records",
+        "fetch_marion_permits",
         "fetch_wash_assessment",
         "fetch_wash_records",
         "fetch_washington_permits",
@@ -112,6 +118,9 @@ TIER_TOOLS = {
         "fetch_crook_assessment",
         "fetch_crook_permits",
         "fetch_county_permits",
+        "fetch_marion_assessment",
+        "fetch_marion_records",
+        "fetch_marion_permits",
         "fetch_wash_assessment",
         "fetch_wash_records",
         "fetch_washington_permits",
@@ -345,6 +354,42 @@ ALL_TOOL_SCHEMAS = {
             "required": ["taxlot", "county_fips"]
         }
     },
+    "fetch_marion_assessment": {
+        "name": "fetch_marion_assessment",
+        "description": "TERRA: Fetch the Marion County assessment + ownership snapshot for a taxlot (Salem, Keizer, Stayton, Aumsville, Silverton, Mt Angel, unincorporated Marion). Use when the user asks who owns a Marion parcel, what's on file, account info, prop class, zoning, current valuation, building info, or any property snapshot on a Marion taxlot. Marion's parcels service ships richer Layer-1 inline data than most Oregon counties — owner, situs, current RMV (land + improvement + total), assessed value, zoning code + authority + URL, year built + building area + living area, prop class + tax routing (tax code / city / school / fire), plus verified deep links to MCASR PropertySummary and the assessor tax-map PDF. IN FLIGHT — flag honestly, do not invent: multi-year tax payment history (MCASR PropertySummary.aspx is ASP.NET WebForms with __VIEWSTATE-gated data on the initial GET — same pattern as Crook's PSO; deep link returns the user one tap from the live history). FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (👤 OWNER / 📍 SITUS / 🧾 ACCOUNT / 🏘️ ZONING / 💰 VALUATION / 🏗️ BUILDING / 🌍 ACREAGE). Highlight rmv_total in 💰 VALUATION. List IN FLIGHT items at the end as 'coming soon' — never apologize. Always end with the mcasr_property deep link and tax_map_pdf so the broker can pull the source themselves.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Full Marion taxlot ID (e.g. '073W27AA00200' for the State Capitol)."},
+                "force_refresh": {"type": "boolean", "default": False, "description": "Currently no-op — Marion L2 is a SQL pass-through over L1 inline; freshness comes from the daily L1 delta refresh."}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_marion_records": {
+        "name": "fetch_marion_records",
+        "description": "TERRA: Fetch the Marion County deed / recorded-instrument snapshot for a taxlot. Use when the user asks about deeds, recent sale, transfer history, recorded documents, or 'what was the last instrument on this Marion parcel'. Returns the MOST-RECENT instrument-of-record (number, type, date, sale price), the current owner of record, plus a deep link to the Marion Clerk's Recordings page where the user can search the full document history. IN FLIGHT — Marion Clerk's public recordings portal URL is not yet located (the standalone DNS endpoints all 404 on probe); only the latest instrument lives in our Layer-1 snapshot, full multi-instrument chain is one click through the Clerk landing page. FORMATTING: TERRA aesthetic. 📜 emoji header. Lead with the latest_instrument (number / type / date / sale_price), then the owner_of_record, then the Clerk deep link. Frame the IN FLIGHT as 'full chain of title is one tap from the Clerk page' — never apologize, never fabricate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Full Marion taxlot ID."},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_marion_permits": {
+        "name": "fetch_marion_permits",
+        "description": "TERRA: Fetch building permits for a Marion County parcel via Oregon's state ePermitting portal (Accela ACA). Convenience wrapper around fetch_county_permits with county_fips='047' pre-set. Marion participates in the same state Accela portal as Crook/Jefferson/Lane — confirmed via the Marion PublicWorksPermits GIS service whose metadata names Accela as the source-of-record. Use when the user asks about permits, building activity, development status on a Salem / Keizer / unincorporated Marion taxlot. IN FLIGHT — same deep-link-only pattern as fetch_crook_permits and fetch_county_permits: server-side scrape of the Accela result page is gated on viewstate capture or Playwright; currently returns a verified deep link the user clicks through to run the search themselves. FORMATTING: TERRA aesthetic. 🚧 emoji header. Frame the deep link as 'one tap from the live state portal.' Surface the future-upgrade note where useful — Marion ALSO ships permits as point geometry via the county GIS service, which is queued as the richer Layer-3 source once the daily-poll permits worker lands.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Full Marion taxlot ID."},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot"]
+        }
+    },
     "fetch_wash_assessment": {
         "name": "fetch_wash_assessment",
         "description": "TERRA: Fetch the Washington County assessment + property snapshot for a taxlot. Use when the user asks about a parcel in Beaverton / Hillsboro / Tigard / Forest Grove / unincorporated Washington — anywhere west-of-Portland-metro. Returns acreage, map_number, taxlot_short, parcel centroid, live zoning code from the Intermap Land Use layer, plus verified deep links to the A&T portal (washcotax) and the official Washington County A&T page. IN FLIGHT — flag honestly: owner, situs, valuation snapshot, multi-year certified values, sales history, deed instruments, tax payment history all live behind washcotax.co.washington.or.us, which is DotNetNuke + ASP.NET WebForms with viewstate-gated TLNO → R-number resolution. Same fight as Crook's Accela scrape and Multnomah's MultcoPropTax — captcha-equivalent. Until the viewstate scrape or paid-tier lands, surface what we have (size + zoning + deep links) and frame the rest as 'coming soon — broker can click through.' FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (🌍 SIZE / 🏘️ ZONING / 📍 LOCATION / 🔗 DEEP LINKS). List IN FLIGHT items at end as 'coming soon' — never apologize. Always end with the at_search_by_taxlot deep link.",
@@ -442,6 +487,9 @@ LOCAL_TOOL_FUNCTIONS = {
     "fetch_crook_assessment": fetch_crook_assessment,
     "fetch_crook_permits": fetch_crook_permits,
     "fetch_county_permits": fetch_county_permits,
+    "fetch_marion_assessment": fetch_marion_assessment,
+    "fetch_marion_records": fetch_marion_records,
+    "fetch_marion_permits": fetch_marion_permits,
     "fetch_wash_assessment": fetch_wash_assessment,
     "fetch_wash_records": fetch_wash_records,
     "fetch_washington_permits": fetch_washington_permits,
