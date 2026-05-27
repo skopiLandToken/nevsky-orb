@@ -255,50 +255,131 @@ def get_ai_spend_today() -> dict:
 
 
 
+# =============================================================================
+# TERRA County Registry — multi-county spatial lookup
+# =============================================================================
+# Adding a new county = one entry below. The query string returns a normalized
+# column set; the function loops registered counties whose bbox contains the
+# point and returns the first hit. Counties don't overlap, so first hit wins.
+#
+# Normalized output columns each query must produce (use NULL::text for fields
+# the county doesn't have natively):
+#   taxlot, section_id, acres, county_url, map_number, owner_name,
+#   situs_address, zone_code, zone_label, parcel_centroid, county_name, county_fips
+# =============================================================================
+
+COUNTY_REGISTRY = {
+    "017": {  # Deschutes (FIPS 41-017)
+        "name": "Deschutes",
+        # bbox: (lat_min, lat_max, lon_min, lon_max)
+        "bbox": (43.5, 44.5, -122.1, -120.5),
+        "query": """
+            SELECT taxlot,
+                   township || '-' || range_ || '-' || section AS section_id,
+                   ROUND((shape_area / 43560.0)::numeric, 3) AS acres,
+                   dial_url AS county_url,
+                   mapnumber AS map_number,
+                   NULL::text AS owner_name,
+                   NULL::text AS situs_address,
+                   zone_code,
+                   zone_jurisdiction AS zone_label,
+                   ST_AsText(ST_Centroid(geom)) AS parcel_centroid,
+                   'Deschutes'::text AS county_name,
+                   '017'::text AS county_fips
+            FROM parcels_deschutes
+            WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            LIMIT 1
+        """,
+    },
+    "013": {  # Crook (FIPS 41-013)
+        "name": "Crook",
+        "bbox": (44.05, 44.50, -121.10, -119.80),
+        "query": """
+            SELECT taxlot,
+                   map_number AS section_id,
+                   ROUND(COALESCE(gis_acres, assessed_acres)::numeric, 3) AS acres,
+                   pats_url AS county_url,
+                   map_number,
+                   owner_name,
+                   situs_address,
+                   zone_code,
+                   zone_desc AS zone_label,
+                   ST_AsText(ST_Centroid(geom)) AS parcel_centroid,
+                   'Crook'::text AS county_name,
+                   '013'::text AS county_fips
+            FROM parcels_crook
+            WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            LIMIT 1
+        """,
+    },
+    # Jefferson (031) and Lane (039) entries land here when their L1 tables exist.
+}
+
+
 def lookup_parcel_by_point(latitude: float, longitude: float) -> dict:
-    """Spatial lookup: Deschutes County parcel containing a lat/lon point."""
+    """Spatial lookup: county parcel containing a lat/lon point.
+
+    Iterates COUNTY_REGISTRY; counties don't overlap so first-hit wins. Returns
+    a normalized shape that's backward-compatible with the original Deschutes-only
+    contract (taxlot, section_id, acres, dial_url, mapnumber, parcel_centroid,
+    development_status, development_note, queried_lat/lon all preserved) plus new
+    multi-county fields (county, county_fips, county_url, owner_name, situs_address,
+    zone_code, zone_label, map_number).
+    """
     try:
         lat = float(latitude)
         lon = float(longitude)
     except (TypeError, ValueError):
         return {"found": False, "reason": "Invalid coordinates"}
 
-    if not (43.5 <= lat <= 44.5) or not (-122.1 <= lon <= -119.8):
-        return {"found": False, "reason": f"Point ({lat}, {lon}) outside Deschutes County. TERRA covers Deschutes only."}
+    candidates = [
+        (fips, entry) for fips, entry in COUNTY_REGISTRY.items()
+        if entry["bbox"][0] <= lat <= entry["bbox"][1]
+        and entry["bbox"][2] <= lon <= entry["bbox"][3]
+    ]
+    if not candidates:
+        covered = ", ".join(e["name"] for e in COUNTY_REGISTRY.values())
+        return {
+            "found": False,
+            "reason": f"Point ({lat}, {lon}) outside TERRA-covered counties. Currently covering: {covered}.",
+        }
 
     with _conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT taxlot,
-                       township || '-' || range_ || '-' || section AS section_id,
-                       ROUND((shape_area / 43560.0)::numeric, 3) AS acres,
-                       dial_url,
-                       ST_AsText(ST_Centroid(geom)) AS parcel_centroid,
-                       mapnumber
-                FROM parcels_deschutes
-                WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
-                LIMIT 1
-                """,
-                (lon, lat),
-            )
-            row = cur.fetchone()
-
-    if not row:
-        return {"found": False, "reason": f"No parcel contains point ({lat}, {lon}). May be road or right-of-way."}
+            for _fips, entry in candidates:
+                cur.execute(entry["query"], (lon, lat))
+                row = cur.fetchone()
+                if row:
+                    county_url = row["county_url"]
+                    county_fips = row["county_fips"]
+                    return {
+                        "found": True,
+                        "taxlot": row["taxlot"],
+                        "county": row["county_name"],
+                        "county_fips": county_fips,
+                        "section_id": row["section_id"],
+                        "acres": float(row["acres"]) if row["acres"] is not None else None,
+                        "county_url": county_url,
+                        # Legacy alias — Deschutes-era callers read dial_url. Only populated
+                        # for Deschutes so a Crook lookup can't accidentally hand a non-DIAL
+                        # URL to a fetch_dial_* tool.
+                        "dial_url": county_url if county_fips == "017" else None,
+                        "map_number": row["map_number"],
+                        "mapnumber": row["map_number"],  # legacy key
+                        "owner_name": row["owner_name"],
+                        "situs_address": row["situs_address"],
+                        "zone_code": row["zone_code"],
+                        "zone_label": row["zone_label"],
+                        "parcel_centroid": row["parcel_centroid"],
+                        "development_status": "unknown",
+                        "development_note": "Tier 2 permit watch not yet built. Permit-derived signals coming.",
+                        "queried_lat": lat,
+                        "queried_lon": lon,
+                    }
 
     return {
-        "found": True,
-        "taxlot": row["taxlot"],
-        "section_id": row["section_id"],
-        "acres": float(row["acres"]) if row["acres"] is not None else None,
-        "dial_url": row["dial_url"],
-        "parcel_centroid": row["parcel_centroid"],
-        "mapnumber": row["mapnumber"],
-        "development_status": "unknown",
-        "development_note": "Tier 2 permit watch not yet built. Permit-derived signals coming.",
-        "queried_lat": lat,
-        "queried_lon": lon,
+        "found": False,
+        "reason": f"No parcel contains point ({lat}, {lon}). May be road or right-of-way.",
     }
 
 
