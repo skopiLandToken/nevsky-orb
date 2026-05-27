@@ -11,6 +11,7 @@ from datetime import datetime, timezone, timedelta
 import re
 import psycopg
 import httpx
+import redis as _yindo_redis_module
 from anthropic import Anthropic
 from biography import handle_biography_message, handle_biography_callback, router as biography_router
 from yakov import router as yakov_router
@@ -230,6 +231,63 @@ async def send_lilith_message_with_markup(chat_id: int, text: str, reply_markup:
         except Exception as e:
             print("[lilith] send_with_markup error: %s", e)
             return {}
+
+
+# === YINDO BRIDGE HELPERS (2026-05-27) ===
+# Yindo is the Telegram interface to host-side Claude Code. Same Yakov, different
+# interface (see CLAUDE.md "One Yakov, multiple interfaces"). The FastAPI app only
+# does the webhook side — guards + enqueue. The actual claude subprocess runs on the
+# host in scripts/yindo_worker.py because the api container is python-slim and
+# doesn't have node/claude installed, and the bridge requires full root host access
+# per Iosif's "same as Yindo via SSH" mandate.
+
+_YINDO_REDIS = None
+
+def _get_yindo_redis():
+    """Lazy singleton redis client for the Yindo queue. The api container reaches
+    redis at hostname `redis` (docker-compose service name)."""
+    global _YINDO_REDIS
+    if _YINDO_REDIS is None:
+        _YINDO_REDIS = _yindo_redis_module.Redis(
+            host=os.getenv("YINDO_REDIS_HOST", "redis"),
+            port=int(os.getenv("YINDO_REDIS_PORT", "6379")),
+            decode_responses=True,
+        )
+    return _YINDO_REDIS
+
+
+def _yindo_escape_md_v2(text: str) -> str:
+    """Telegram MarkdownV2 reserves these chars outside formatting entities.
+    Used for short webhook-side acks; the worker has its own (richer) escaper
+    that preserves code blocks. Keep this conservative — escape everything."""
+    reserved = r'_*[]()~`>#+-=|{}.!\\'
+    return ''.join(('\\' + c if c in reserved else c) for c in text)
+
+
+async def send_yindo_message(chat_id: int, text: str, parse_mode: str | None = "MarkdownV2"):
+    """Send via Yindo's dedicated bot token. Used only by webhook-side fast-path
+    acks (queued / status / cancel / errors). The host-side worker has its own
+    sender with code-block-aware chunking."""
+    bot_token = os.environ.get("YINDO_BOT_TOKEN", "")
+    if not bot_token:
+        # No token = nothing to do. Don't fall back to TELEGRAM_BOT_TOKEN — that
+        # would post as the wrong bot identity.
+        return
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    async with httpx.AsyncClient() as c:
+        try:
+            resp = await c.post(url, json=payload, timeout=10)
+            if resp.status_code >= 400 and parse_mode:
+                # Retry as plain text — MarkdownV2 escape edge case shouldn't
+                # cost Iosif the ack message.
+                payload.pop("parse_mode", None)
+                await c.post(url, json=payload, timeout=10)
+        except Exception as e:
+            print(f"[yindo] send error: {e}")
+# === END YINDO BRIDGE HELPERS ===
 
 
 async def send_sophia_message_with_markup(chat_id: int, text: str, reply_markup: dict):
@@ -3924,6 +3982,185 @@ async def lilith_webhook(request: Request):
             print(f"[lilith_webhook] engine error: {_engine_err}")
             await send_lilith_message(chat_id, "Lilith hit an internal error. Yakov has been logged.")
     return {"ok": True}
+
+
+# === YINDO TELEGRAM BRIDGE WEBHOOK (2026-05-27) ===
+# Routes Iosif's Telegram messages to a host-side `claude --print --resume`
+# subprocess via Redis queue. The actual subprocess + chunking + sending lives in
+# scripts/yindo_worker.py (must run on host — api container has no claude CLI and
+# is sandboxed away from /root, /etc, docker socket, etc.).
+#
+# Owner-only by hard telegram_id check. Per Iosif's doctrine, non-owners get
+# silent-ignored (no Telegram reply at all — "pretend the bot doesn't exist").
+# This differs from Sophia/Ophelia/Lilith, which send a polite redirect.
+
+YINDO_OWNER_TELEGRAM_ID = "7583693994"  # Iosif. Hard-coded by design.
+
+@app.post("/telegram/yindo/webhook")
+async def yindo_webhook(
+    request: Request,
+    x_telegram_bot_api_secret_token: str = Header(None),
+):
+    # === WEBHOOK SECRET CHECK (yindo, 2026-05-27) ===
+    # When YINDO_WEBHOOK_SECRET is set (recommended), Telegram includes it as a
+    # header on every POST per setWebhook?secret_token=... Reject mismatches fast
+    # so spoofed posts never touch the queue.
+    expected_secret = os.environ.get("YINDO_WEBHOOK_SECRET", "")
+    if expected_secret and x_telegram_bot_api_secret_token != expected_secret:
+        raise HTTPException(status_code=401, detail="invalid webhook secret")
+
+    payload = await request.json()
+    message = payload.get("message", {}) or {}
+    chat = message.get("chat", {}) or {}
+    chat_id = chat.get("id")
+    text = (message.get("text") or "").strip()
+    from_user = message.get("from", {}) or {}
+    sender_telegram_id = str(from_user.get("id", ""))
+    message_id = message.get("message_id")
+
+    # === BLOCKLIST GUARD (yindo, 2026-05-27) ===
+    try:
+        _tg_uid = (message.get("from") or {}).get("id")
+        if _tg_uid:
+            _blocked = await check_blocklist_and_archive(
+                telegram_user_id=_tg_uid,
+                chat_id=chat_id or 0,
+                message_text=text or "",
+                bot_name="yindo",
+                message_type="text" if message.get("text") else ("caption" if message.get("caption") else "other"),
+                full_update=payload,
+            )
+            if _blocked:
+                return {"ok": True, "blocked": True}
+    except Exception as _e:
+        print(f"[yindo_webhook] blocklist guard error: {_e}")
+
+    # === OWNER CHECK (yindo, 2026-05-27) — silent ignore ===
+    # Doctrine: "Everyone else gets silently ignored (no error reply — pretend
+    # the bot doesn't exist)." We still log unauthorized hits for forensics, but
+    # no Telegram reply goes out. This is intentionally different from Sophia/
+    # Ophelia/Lilith — Yindo is a developer tool, not a public-facing surface.
+    if sender_telegram_id and sender_telegram_id != YINDO_OWNER_TELEGRAM_ID:
+        try:
+            with get_db_connection() as _conn:
+                with _conn.cursor() as _cur:
+                    _cur.execute(
+                        """INSERT INTO unauthorized_contact_log
+                           (bot_canonical_name, telegram_user_id, telegram_username, chat_id, message_text, full_update_json)
+                           VALUES (%s, %s, %s, %s, %s, %s)""",
+                        ("yindo", int(sender_telegram_id),
+                         from_user.get("username"), chat_id or 0,
+                         text or "", json.dumps(payload)),
+                    )
+                    _conn.commit()
+        except Exception as _log_err:
+            print(f"[yindo_webhook] unauthorized log error: {_log_err}")
+        return {"ok": True, "silent_ignored": True}
+
+    if not chat_id or not text:
+        return {"ok": True, "skipped": "no_chat_or_text"}
+
+    # === AUDIT LOG: inbound ===
+    try:
+        with get_db_connection() as _conn:
+            with _conn.cursor() as _cur:
+                _cur.execute(
+                    """INSERT INTO yindo_telegram_log (chat_id, direction, body, metadata)
+                       VALUES (%s, 'in', %s, %s)""",
+                    (chat_id, text, json.dumps({"message_id": message_id})),
+                )
+                _conn.commit()
+    except Exception as _e:
+        print(f"[yindo_webhook] inbound log error: {_e}")
+
+    # === FAST-PATH SLASH COMMANDS ===
+    # /cancel and /status answered synchronously by the webhook — they shouldn't
+    # be blocked by an in-flight subprocess.
+    cmd = text.split()[0].lower() if text else ""
+
+    if cmd in ("/cancel", "/stop"):
+        try:
+            r = _get_yindo_redis()
+            drained = 0
+            held = []
+            while True:
+                item = r.lpop("yindo:queue")
+                if item is None:
+                    break
+                try:
+                    job = json.loads(item)
+                except Exception:
+                    held.append(item)
+                    continue
+                if job.get("chat_id") == chat_id:
+                    drained += 1
+                else:
+                    held.append(item)
+            for item in held:
+                r.rpush("yindo:queue", item)
+            r.set(f"yindo:cancel:{chat_id}", "1", ex=60)
+            ack = (f"Drained {drained} queued message(s). "
+                   "Running message (if any) will finish on its own — "
+                   "SSH and `pkill -f claude` if you need it dead now.")
+            await send_yindo_message(chat_id, _yindo_escape_md_v2(ack))
+        except Exception as _e:
+            print(f"[yindo_webhook] /cancel error: {_e}")
+            await send_yindo_message(chat_id, f"Cancel failed: {_e}", parse_mode=None)
+        return {"ok": True, "cancelled": True}
+
+    if cmd == "/status":
+        try:
+            r = _get_yindo_redis()
+            current_raw = r.get("yindo:current")
+            queue_len = r.llen("yindo:queue") or 0
+            if current_raw:
+                try:
+                    cur = json.loads(current_raw)
+                    started = datetime.fromisoformat(cur["started_at"])
+                    elapsed = int((datetime.now(timezone.utc) - started).total_seconds())
+                    preview = (cur.get("preview") or "")[:80]
+                    body = f'Working: "{preview}" ({elapsed}s elapsed). Queue depth: {queue_len}.'
+                except Exception:
+                    body = f"Working (running). Queue depth: {queue_len}."
+            else:
+                body = f"Idle. Queue depth: {queue_len}."
+            await send_yindo_message(chat_id, _yindo_escape_md_v2(body))
+        except Exception as _e:
+            print(f"[yindo_webhook] /status error: {_e}")
+            await send_yindo_message(chat_id, f"Status failed: {_e}", parse_mode=None)
+        return {"ok": True, "status_sent": True}
+
+    # === ENQUEUE ===
+    try:
+        r = _get_yindo_redis()
+        queue_len_before = r.llen("yindo:queue") or 0
+        if queue_len_before >= 3:
+            await send_yindo_message(
+                chat_id,
+                _yindo_escape_md_v2("Queue full (3 pending). /cancel to clear."),
+            )
+            return {"ok": True, "rejected": "queue_full"}
+        job = {
+            "chat_id": chat_id,
+            "text": text,
+            "message_id": message_id,
+            "enqueued_at": datetime.now(timezone.utc).isoformat(),
+        }
+        r.rpush("yindo:queue", json.dumps(job))
+        # Only ack if there's something ahead in line — when idle, the worker's
+        # actual reply is the only signal Iosif needs.
+        if queue_len_before > 0:
+            await send_yindo_message(
+                chat_id,
+                _yindo_escape_md_v2(
+                    f"Queued (position #{queue_len_before + 1}). Working on previous message."
+                ),
+            )
+    except Exception as _e:
+        print(f"[yindo_webhook] enqueue error: {_e}")
+        await send_yindo_message(chat_id, f"Yindo bridge enqueue failed: {_e}", parse_mode=None)
+    return {"ok": True, "enqueued": True}
+# === END YINDO TELEGRAM BRIDGE WEBHOOK ===
 
 
 # === SITE_PLANS_ROUTES_START ===

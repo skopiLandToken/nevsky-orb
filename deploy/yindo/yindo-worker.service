@@ -1,0 +1,36 @@
+[Unit]
+Description=Yindo — Telegram bridge to host-side Claude Code (Yakov)
+Documentation=file:///opt/nevsky-dev/CLAUDE.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=yindo
+Group=yindo
+WorkingDirectory=/opt/nevsky-dev
+EnvironmentFile=/opt/nevsky-dev/.env
+Environment=HOME=/var/lib/yindo
+Environment=YINDO_SCRATCH_DIR=/opt/nevsky-dev/yindo-scratch
+ExecStart=/opt/nevsky-dev/.venv-yindo/bin/python /opt/nevsky-dev/scripts/yindo_worker.py
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=yindo-worker
+
+# Security model: DOCTRINE-YINDO-SECURITY-BOUNDARY-01 (2026-05-27)
+# Layered defense, no single layer solely load-bearing:
+#   1. Owner check — hard telegram_id == 7583693994 in the webhook
+#   2. Webhook secret — Telegram secret_token header validated per request
+#   3. Non-root worker — runs as yindo, source tree read-only by default,
+#      writable scratch at /opt/nevsky-dev/yindo-scratch
+#   4. Selective sudo — /etc/sudoers.d/yindo, narrow NOPASSWD allowlist
+# systemd sandboxing (NoNewPrivileges=false intentionally; sudo needs to
+# escalate within the allowlist). EnvironmentFile is read by systemd as root
+# before dropping to User=yindo, so .env stays mode 600 root:root.
+
+[Install]
+WantedBy=multi-user.target

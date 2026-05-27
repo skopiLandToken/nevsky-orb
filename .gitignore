@@ -6,6 +6,7 @@ __pycache__/
 .Python
 .pytest_cache/
 .venv/
+.venv-*/
 venv/
 .envrc
 .DS_Store
@@ -31,3 +32,6 @@ kb/
 .idea/
 *.swp
 *.swo
+
+# Yindo bridge scratch (writable workspace for yindo-via-Telegram, 2026-05-27)
+yindo-scratch/

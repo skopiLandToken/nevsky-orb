@@ -1,0 +1,25 @@
+# /etc/sudoers.d/yindo
+# Yindo bridge — selective NOPASSWD entries for the yindo user.
+# Doctrine: DOCTRINE-YINDO-SECURITY-BOUNDARY-01 (2026-05-27)
+# Layered defense: owner check (telegram_id) + webhook secret + non-root
+# worker + narrow sudoers. No single layer is solely load-bearing.
+#
+# Each entry is the exact command string. sudoers requires invocation match
+# pattern element-by-element on argv. Wildcards are constrained to numeric
+# values where present, to deny arbitrary-argument injection.
+
+# --- Service restart (specific containers, exact args, no extra flags allowed) ---
+yindo ALL=(root) NOPASSWD: /usr/bin/docker compose -f /opt/nevsky-dev/docker-compose.yml restart api
+yindo ALL=(root) NOPASSWD: /usr/bin/docker compose -f /opt/nevsky-dev/docker-compose.yml restart worker
+
+# --- Log reading (--no-pager pinned to disable $PAGER shellout from less/more) ---
+yindo ALL=(root) NOPASSWD: /usr/bin/journalctl --no-pager -u yindo-worker
+yindo ALL=(root) NOPASSWD: /usr/bin/journalctl --no-pager -n [0-9]* -u yindo-worker
+yindo ALL=(root) NOPASSWD: /usr/bin/journalctl --no-pager -u nevsky-api
+yindo ALL=(root) NOPASSWD: /usr/bin/journalctl --no-pager -n [0-9]* -u nevsky-api
+
+# --- Container log reading (tail size constrained to numeric) ---
+yindo ALL=(root) NOPASSWD: /usr/bin/docker logs nevsky-api
+yindo ALL=(root) NOPASSWD: /usr/bin/docker logs --tail [0-9]* nevsky-api
+yindo ALL=(root) NOPASSWD: /usr/bin/docker logs nevsky-worker
+yindo ALL=(root) NOPASSWD: /usr/bin/docker logs --tail [0-9]* nevsky-worker
