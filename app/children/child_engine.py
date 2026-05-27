@@ -37,6 +37,7 @@ from .orb_db import (
     fetch_dial_dev_docs,
     query_yakov_handoffs,
     query_yakov_commits,
+    calculate_lot_yield,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ TIER_TOOLS = {
         "fetch_dial_dev_docs",
         "query_yakov_handoffs",
         "query_yakov_commits",
+        "calculate_lot_yield",
         "web_search",
     ],
     "executive": [
@@ -83,6 +85,7 @@ TIER_TOOLS = {
         "fetch_dial_sales",
         "fetch_dial_valuation",
         "fetch_dial_dev_docs",
+        "calculate_lot_yield",
         "web_search",
     ],
     "staff": [
@@ -227,6 +230,20 @@ ALL_TOOL_SCHEMAS = {
             "required": ["taxlot"]
         }
     },
+    "calculate_lot_yield": {
+        "name": "calculate_lot_yield",
+        "description": "TERRA — SPECULATIVE residential lot-yield analysis. Verify with planning office before quoting. Computes a rough estimate of how many residential lots could theoretically be carved from a Deschutes County parcel and (optionally) the gross retail value if the broker provides a per-lot market estimate. CALL when a broker asks 'how many lots can I get on parcel X', 'what's parcel X worth as a development', 'what's the yield on this taxlot', or after a TERRA SCAN COMPLETE on a residential parcel ≥1.0 acre. INPUTS: parcel_id (taxlot string, required). Optional: deduction_override (0-1 fraction for roads/utilities/setbacks; default 0.25 = 25%), per_lot_value_override (USD per finished lot — broker's own market number; if omitted, the tool returns a yield-only result and prompts the broker for their estimate), target_zone_override (force a different zone for what-if rezone scenarios). BEHAVIOR: (a) if the parcel has no zoning on file, the tool live-queries the county GIS service and caches the result — adds ~500ms latency but completes the call. (b) Non-residential zones return an informational dict (not an error) noting yield-calc doesn't apply. (c) Zones outside the seed lookup return a structured error with guidance — NO fake numbers. (d) Every result carries a footer disclaimer: 'TERRA estimate — actual yield subject to site conditions, plat approval, and jurisdictional review. Verify with the city/county planning office before underwriting.' DOCTRINE: per DOCTRINE-TERRA-ANALYSIS-TOOL-01, this tool is speculative analysis only — never quote outputs as certified yield or appraised value. Per DOCTRINE-YIELD-HOOK-THEN-CLOSE-01, the v1 output is the broker hook; v2 'deep dive' refinement (setbacks, slope, wetlands) comes later. FORMATTING for Sophia's reply: render the result as a TERRA card with the broker-friendly numbers up front (lot_yield, gross_retail if available), then assumptions, then the footer. NEVER omit the footer.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "parcel_id": {"type": "string", "description": "Deschutes County taxlot identifier (e.g. '151319AC00139')."},
+                "deduction_override": {"type": "number", "description": "Optional. Fraction (0-1) deducted from gross acres for roads/utilities/setbacks. Default 0.25."},
+                "per_lot_value_override": {"type": "number", "description": "Optional. Broker-supplied market value per finished lot in USD. Omit to get a yield-only card; the tool will prompt for the broker's market estimate."},
+                "target_zone_override": {"type": "string", "description": "Optional. Force-apply a different zone code (e.g. for a rezone what-if). Must match the same jurisdiction as the parcel."}
+            },
+            "required": ["parcel_id"]
+        }
+    },
     "query_yakov_handoffs": {
         "name": "query_yakov_handoffs",
         "description": "OMNISCIENCE: pull recent Yakov session handoffs from knowledge_store. Yakov writes one of these at the end of every coding session — they capture summary, changes shipped, files modified, commit hashes, next-session priorities, and any locked doctrine. CALL THIS FIRST when Iosif asks 'what did Yakov do today/this week/recently', 'what shipped', 'what's the latest from Yakov', 'what did the last session do', 'are there any open items from Yakov', or any question about recent technical work. Returns a list of handoff rows with their structured metadata. Each row's `summary`, `changes`, `next_priorities`, and `doctrine_notes` are the most useful fields to surface. For 'today' use hours_back=24; for 'this week' use 168. Use only_high_impact=true when Iosif asks specifically about big shipments or production-level work.",
@@ -271,6 +288,7 @@ LOCAL_TOOL_FUNCTIONS = {
     "get_ai_spend_today": get_ai_spend_today,
     "query_yakov_handoffs": query_yakov_handoffs,
     "query_yakov_commits": query_yakov_commits,
+    "calculate_lot_yield": calculate_lot_yield,
 }
 
 

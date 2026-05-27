@@ -710,3 +710,255 @@ def query_yakov_commits(hours_back: int | None = None, limit: int = 20) -> list[
     except Exception as e:
         logger.error("query_yakov_commits error: %s", e)
         return []
+
+
+# =============================================================================
+# TERRA YIELD CALCULATOR — speculative residential lot-yield estimate.
+# Per DOCTRINE-TERRA-ANALYSIS-TOOL-01: every output is speculative and carries
+# the planning-office disclaimer. Calculator never asserts certainty.
+# =============================================================================
+
+_TERRA_FOOTER = (
+    "TERRA estimate — actual yield subject to site conditions, plat approval, "
+    "and jurisdictional review. Verify with the city/county planning office "
+    "before underwriting."
+)
+
+_ZONE_TYPE_LBL = {
+    1: "DESCHUTES COUNTY", 2: "CITY OF BEND", 3: "CITY OF REDMOND",
+    4: "CITY OF SISTERS", 5: "ALFALFA", 6: "BLACK BUTTE RANCH",
+    7: "BROTHERS", 8: "DESCHUTES JUNCTION", 9: "DESCHUTES RIVER WOODS",
+    10: "HAMPTON", 11: "WIDGI CREEK / INN OF 7TH MOUNTAIN",
+    12: "LA PINE", 13: "MILLICAN", 14: "SPRING RIVER", 15: "SUNRIVER",
+    16: "TERREBONNE", 17: "TUMALO", 18: "WHISTLE STOP", 19: "WILD HUNT",
+    20: "CITY OF LA PINE",
+}
+_COMMUNITY_TYPE_LBL = {
+    1: "COUNTY", 2: "URBAN RESERVE AREA", 3: "URBAN GROWTH BOUNDARY",
+    4: "URBAN UNINCORPORATED COMMUNITY", 5: "RURAL SERVICE CENTER",
+    6: "RURAL COMMUNITY", 7: "RESORT COMMUNITY", 8: "RURAL COMMERCIAL",
+}
+
+
+def _live_query_zoning(lat: float, lon: float) -> dict | None:
+    """Phase 0B fallback. Point-query the Deschutes County ArcGIS zoning layer
+    when parcels_deschutes.zone_code is NULL. Returns decoded zone info or None.
+    Slow path: 300-800ms per call. Tool layer caches the result.
+    """
+    import json as _json
+    import urllib.request as _urlreq
+    import urllib.parse as _urlparse
+
+    geom = _json.dumps({"x": lon, "y": lat, "spatialReference": {"wkid": 4326}})
+    qs = _urlparse.urlencode({
+        "geometry": geom,
+        "geometryType": "esriGeometryPoint",
+        "inSR": 4326,
+        "spatialRel": "esriSpatialRelIntersects",
+        "outFields": "ZONE,ZONE_TYPE,COMMUNITY_TYPE,ORDINANCE",
+        "returnGeometry": "false",
+        "f": "pjson",
+    })
+    url = (
+        "https://maps.deschutes.org/arcgis/rest/services/"
+        "OpenData/LandFD/MapServer/3/query?" + qs
+    )
+    try:
+        with _urlreq.urlopen(url, timeout=10) as resp:
+            data = _json.loads(resp.read())
+    except Exception as e:
+        logger.warning("live zoning query failed for (%s,%s): %s", lat, lon, e)
+        return None
+    feats = data.get("features") or []
+    if not feats:
+        return None
+    a = feats[0].get("attributes") or {}
+    return {
+        "zone": a.get("ZONE"),
+        "zone_type_int": a.get("ZONE_TYPE"),
+        "community_type_int": a.get("COMMUNITY_TYPE"),
+        "zone_jurisdiction": _ZONE_TYPE_LBL.get(a.get("ZONE_TYPE")),
+        "community_class": _COMMUNITY_TYPE_LBL.get(a.get("COMMUNITY_TYPE")),
+        "ordinance": (a.get("ORDINANCE") or "").strip() or None,
+    }
+
+
+def calculate_lot_yield(
+    parcel_id: str,
+    deduction_override: float | None = None,
+    per_lot_value_override: float | None = None,
+    target_zone_override: str | None = None,
+) -> dict:
+    """TERRA speculative residential yield estimate for a Deschutes County parcel.
+
+    See DOCTRINE-TERRA-ANALYSIS-TOOL-01 and DOCTRINE-YIELD-HOOK-THEN-CLOSE-01.
+    """
+    SQFT_PER_ACRE = 43560
+    deduction = deduction_override if deduction_override is not None else 0.25
+
+    # 1. Pull parcel
+    try:
+        with _conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, taxlot, zone_code, zone_jurisdiction, zone_community_class,
+                          shape_area,
+                          ST_Y(ST_Centroid(geom)) AS lat,
+                          ST_X(ST_Centroid(geom)) AS lon
+                   FROM parcels_deschutes WHERE taxlot = %s""",
+                (parcel_id,),
+            )
+            row = cur.fetchone()
+    except Exception as e:
+        return {"error": f"DB error pulling parcel: {e}", "footer": _TERRA_FOOTER}
+
+    if not row:
+        return {
+            "parcel_id": parcel_id,
+            "error": f"Parcel '{parcel_id}' not found in parcels_deschutes.",
+            "footer": _TERRA_FOOTER,
+        }
+
+    parcel_db_id = row["id"]
+    zone_code = row["zone_code"]
+    zone_jurisdiction = row["zone_jurisdiction"]
+    shape_area = float(row["shape_area"] or 0)
+    gross_acres = round(shape_area / SQFT_PER_ACRE, 3)
+    resolved_via = "bulk_join"
+
+    # 2. Phase 0B fallback — live-query if no zoning on file
+    if not zone_code:
+        live = _live_query_zoning(row["lat"], row["lon"])
+        if not live or not live.get("zone"):
+            return {
+                "parcel_id": parcel_id,
+                "gross_acres": gross_acres,
+                "error": (
+                    "No zoning data on file for this parcel — likely federal, "
+                    "state, or special-jurisdiction land. Yield calculation not applicable."
+                ),
+                "resolved_via": "fallback_no_match",
+                "footer": _TERRA_FOOTER,
+            }
+        zone_code = live["zone"]
+        zone_jurisdiction = live["zone_jurisdiction"]
+        resolved_via = "fallback_live_query"
+        # CACHE WRITE — backfilling reference data from the authoritative external
+        # source (Deschutes County ArcGIS). Not business-state mutation; idempotent.
+        # Same pattern as fetch_dial_permits writing to dial_permit_cache.
+        try:
+            with _conn() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE parcels_deschutes
+                       SET zone_code = %s,
+                           zone_jurisdiction = %s,
+                           zone_community_class = %s,
+                           zone_resolved_at = now()
+                       WHERE id = %s AND zone_code IS NULL""",
+                    (zone_code, zone_jurisdiction, live.get("community_class"), parcel_db_id),
+                )
+                conn.commit()
+        except Exception as e:
+            logger.warning("zoning cache backfill failed for %s: %s", parcel_id, e)
+
+    # 3. Apply target_zone_override (what-if rezone analysis)
+    effective_zone = (target_zone_override or zone_code).strip() if (target_zone_override or zone_code) else None
+    effective_jurisdiction = zone_jurisdiction
+
+    # 4. Look up zoning rules
+    try:
+        with _conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT zone_code, zone_label, is_residential, min_lot_sqft,
+                          source_section, source_url, verified_at, notes
+                   FROM zoning_lookup
+                   WHERE jurisdiction = %s AND zone_code = %s""",
+                (effective_jurisdiction, effective_zone),
+            )
+            lookup = cur.fetchone()
+    except Exception as e:
+        return {"error": f"DB error looking up zoning: {e}", "footer": _TERRA_FOOTER}
+
+    if not lookup:
+        return {
+            "parcel_id": parcel_id,
+            "gross_acres": gross_acres,
+            "zone_code": effective_zone,
+            "zone_jurisdiction": effective_jurisdiction,
+            "resolved_via": resolved_via,
+            "error": (
+                f"Zone '{effective_zone}' for jurisdiction '{effective_jurisdiction}' "
+                "not in lookup. Use target_zone_override or verify with planning office."
+            ),
+            "footer": _TERRA_FOOTER,
+        }
+
+    is_residential = bool(lookup["is_residential"])
+    min_lot_sqft = lookup["min_lot_sqft"]
+    verified = lookup["verified_at"] is not None
+
+    # 5. Non-residential — informational, not an error
+    if not is_residential or not min_lot_sqft:
+        return {
+            "parcel_id": parcel_id,
+            "gross_acres": gross_acres,
+            "zone_code": effective_zone,
+            "zone_jurisdiction": effective_jurisdiction,
+            "zone_label": lookup["zone_label"],
+            "is_residential": False,
+            "message": (
+                f"Non-residential zone ({lookup['zone_label']}) — yield calculation "
+                "not applicable. Brokers analyzing commercial/industrial parcels should "
+                "evaluate FAR (floor-area ratio), parking ratio, and adjacent retail "
+                "demand instead — TERRA does not yet model those metrics."
+            ),
+            "source_section": lookup["source_section"],
+            "source_url": lookup["source_url"],
+            "verified": verified,
+            "resolved_via": resolved_via,
+            "footer": _TERRA_FOOTER,
+        }
+
+    # 6. The math
+    usable_acres = round(gross_acres * (1.0 - deduction), 3)
+    usable_sqft = int(round(usable_acres * SQFT_PER_ACRE))
+    lot_yield = max(0, usable_sqft // int(min_lot_sqft))
+
+    out = {
+        "parcel_id": parcel_id,
+        "gross_acres": gross_acres,
+        "usable_acres": usable_acres,
+        "usable_sqft": usable_sqft,
+        "min_lot_sqft": int(min_lot_sqft),
+        "lot_yield": int(lot_yield),
+        "zone_code": effective_zone,
+        "zone_jurisdiction": effective_jurisdiction,
+        "zone_label": lookup["zone_label"],
+        "is_residential": True,
+        "source_section": lookup["source_section"],
+        "source_url": lookup["source_url"],
+        "verified": verified,
+        "resolved_via": resolved_via,
+        "assumptions_used": {
+            "deduction_pct": deduction,
+            "deduction_default_used": deduction_override is None,
+            "target_zone_overridden": target_zone_override is not None,
+            "verified_against_ordinance": verified,
+        },
+        "footer": _TERRA_FOOTER,
+    }
+
+    # 7. Retail line — only if broker provided a per-lot value
+    if per_lot_value_override is not None and per_lot_value_override > 0:
+        out["per_lot_value"] = float(per_lot_value_override)
+        out["gross_retail"] = round(lot_yield * float(per_lot_value_override), 2)
+        out["per_lot_value_prompt_needed"] = False
+    else:
+        out["per_lot_value"] = None
+        out["gross_retail"] = None
+        out["per_lot_value_prompt_needed"] = True
+        out["per_lot_value_prompt_text"] = (
+            "Broker: what's your market value per finished lot in this area? "
+            "TERRA needs your number — we don't pretend to know your market better than you do."
+        )
+
+    return out
