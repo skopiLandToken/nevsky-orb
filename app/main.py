@@ -197,6 +197,41 @@ async def send_hypatia_message(chat_id: int, text: str):
             logger.warning("send_hypatia_message error: %s", e)
 
 
+async def send_lilith_message(chat_id: int, text: str):
+    """Send via Lilith's dedicated bot token (Jacob Gale's executive assistant)."""
+    bot_token = os.environ.get("LILITH_BOT_TOKEN", "")
+    if not bot_token:
+        return await send_telegram_message(chat_id, text)
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    async with httpx.AsyncClient() as c:
+        try:
+            await c.post(url, json=payload, timeout=10)
+        except Exception as e:
+            print("[lilith] send error: %s", e)
+
+
+async def send_lilith_message_with_markup(chat_id: int, text: str, reply_markup: dict):
+    """Send via Lilith bot with inline keyboard markup."""
+    bot_token = os.environ.get("LILITH_BOT_TOKEN", "")
+    if not bot_token:
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "Markdown",
+        "reply_markup": reply_markup,
+    }
+    async with httpx.AsyncClient() as c:
+        try:
+            resp = await c.post(url, json=payload, timeout=10)
+            return resp.json()
+        except Exception as e:
+            print("[lilith] send_with_markup error: %s", e)
+            return {}
+
+
 async def send_sophia_message_with_markup(chat_id: int, text: str, reply_markup: dict):
     """Send via Sophia bot with inline keyboard markup."""
     bot_token = os.environ.get("SOPHIA_BOT_TOKEN", "")
@@ -3811,6 +3846,83 @@ async def hypatia_webhook(request: Request):
         # Anyone else who reaches this point gets silence — no welcome, no intro,
         # no LLM call. The bot is dead. The shell exists for evidence capture only.
         # === END ENGINE ROUTING (hypatia) ===
+    return {"ok": True}
+
+
+@app.post("/telegram/lilith/webhook")
+async def lilith_webhook(request: Request):
+    payload = await request.json()
+    callback_query = payload.get("callback_query", {}) or {}
+    if callback_query:
+        lilith_token = os.environ.get("LILITH_BOT_TOKEN", "")
+        return await process_telegram_callback_query(callback_query, response_bot_token=lilith_token)
+    message = payload.get("message", {}) or {}
+    chat = message.get("chat", {}) or {}
+    chat_id = chat.get("id")
+    text = (message.get("text") or "").strip()
+    from_user = message.get("from", {}) or {}
+    sender_telegram_id = str(from_user.get("id", ""))
+
+    # === BLOCKLIST GUARD (lilith, 2026-05-25) ===
+    try:
+        _telegram_user_id = (message.get("from") or {}).get("id")
+        if _telegram_user_id:
+            _blocked = await check_blocklist_and_archive(
+                telegram_user_id=_telegram_user_id,
+                chat_id=chat_id or 0,
+                message_text=text or "",
+                bot_name="lilith",
+                message_type="text" if message.get("text") else ("caption" if message.get("caption") else "other"),
+                full_update=payload,
+            )
+            if _blocked:
+                return {"ok": True, "blocked": True}
+    except Exception as _e:
+        print(f"[lilith_webhook] blocklist guard error: {_e}")
+    # === END BLOCKLIST GUARD ===
+
+    # === OWNER CHECK (lilith, 2026-05-25) ===
+    # Lilith is bound to Jacob Alan Gale, Land Development Executive.
+    # Iosif (founder) is also permitted for oversight/onboarding.
+    # Telegram IDs: Jacob = 8898341376, Iosif = 7583693994.
+    try:
+        _PERMITTED = {"8898341376", "7583693994"}
+        if sender_telegram_id and sender_telegram_id not in _PERMITTED:
+            try:
+                with get_db_connection() as _conn:
+                    with _conn.cursor() as _cur:
+                        _cur.execute(
+                            """INSERT INTO unauthorized_contact_log
+                               (bot_canonical_name, telegram_user_id, telegram_username, chat_id, message_text, full_update_json)
+                               VALUES (%s, %s, %s, %s, %s, %s)""",
+                            ("lilith", int(sender_telegram_id),
+                             from_user.get("username"), chat_id or 0,
+                             text or "", json.dumps(payload)),
+                        )
+                        _conn.commit()
+            except Exception as _log_err:
+                print(f"[lilith_webhook] unauthorized log error: {_log_err}")
+            if chat_id:
+                await send_lilith_message(chat_id,
+                "Hi — Lilith is Jacob Gale's executive assistant inside SKOpi Global Holdings and isn't configured for outside conversations. "
+                "If you're trying to reach SKOpi, please email iosif@skopi.io. Thanks for understanding.")
+            return {"ok": True, "redirected": True}
+    except Exception as _owner_err:
+        print(f"[lilith_webhook] owner check error: {_owner_err}")
+    # === END OWNER CHECK (lilith) ===
+
+    # === ENGINE ROUTING (lilith, 2026-05-25) ===
+    if chat_id:
+        try:
+            from children.child_engine import ask_child as _engine_ask, get_intro as _engine_intro
+            if text.lower() in ["/start", "hi", "hello", "hi lilith", "hello lilith", ""]:
+                await send_lilith_message(chat_id, _engine_intro("lilith"))
+            else:
+                _reply = await _engine_ask("lilith", user_message=text)
+                await send_lilith_message(chat_id, _reply)
+        except Exception as _engine_err:
+            print(f"[lilith_webhook] engine error: {_engine_err}")
+            await send_lilith_message(chat_id, "Lilith hit an internal error. Yakov has been logged.")
     return {"ok": True}
 
 
