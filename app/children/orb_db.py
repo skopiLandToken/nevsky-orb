@@ -419,6 +419,41 @@ COUNTY_REGISTRY = {
             LIMIT 1
         """,
     },
+    "005": {  # Clackamas (FIPS 41-005) — Tier 1 Flagship, Portland metro south
+        "name": "Clackamas",
+        # bbox: covers Oregon City + Lake Oswego + West Linn + Milwaukie +
+        # Happy Valley + Wilsonville (shared east strip with Washington) +
+        # unincorporated south to the Cascade foothills. Padded slightly.
+        "bbox": (45.05, 45.55, -123.10, -121.65),
+        "query": """
+            SELECT taxlot,
+                   parcel_number AS section_id,
+                   -- Source shape_area is Web Mercator m² (latitude-distorted).
+                   -- Compute true acres geodesically: ST_Area(::geography) is m²
+                   -- on the WGS84 spheroid; 4046.8564224 m² per acre.
+                   ROUND((ST_Area(geom::geography) / 4046.8564224)::numeric, 3) AS acres,
+                   -- ascendweb (A&T portal) account search landing. PARCEL_NUMBER
+                   -- is the 8-char account # the portal expects in the Account
+                   -- Number field. Captcha-free landing; the POST that resolves
+                   -- to property detail is the __VIEWSTATE-gated piece.
+                   ('http://ascendweb.clackamas.us/default.aspx?mAccount=' || parcel_number) AS county_url,
+                   parcel_number AS map_number,
+                   -- Clackamas L1 ships only TLNO + PARCEL_NUMBER + SITUS + TAXCODE
+                   -- + geom (owner/valuation/sale/zoning explicitly stripped from
+                   -- the public view by source). Resolved on demand by
+                   -- fetch_clack_assessment.
+                   NULL::text AS owner_name,
+                   situs_address,
+                   NULL::text AS zone_code,
+                   NULL::text AS zone_label,
+                   ST_AsText(ST_Centroid(geom)) AS parcel_centroid,
+                   'Clackamas'::text AS county_name,
+                   '005'::text AS county_fips
+            FROM parcels_clackamas
+            WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            LIMIT 1
+        """,
+    },
     # Jefferson (031) lands here when its L1 table exists.
 }
 
@@ -2419,6 +2454,350 @@ def fetch_lane_permits(taxlot: str, force_refresh: bool = False) -> dict:
         else:
             result["jurisdiction"] = f"Lane County unincorporated / small city (Oregon state Accela) — juris={juris or 'LAN'}"
     return result
+
+
+# =============================================================================
+# CLACKAMAS Layer 2 + Layer 3 Fetchers (s3 Yindo session — 2026-05-27, Portland metro trifecta close)
+# =============================================================================
+# Reality check (2026-05-27, s3 Yindo session — Clackamas after Washington):
+# Clackamas's hosted Taxlots view is THE OPPOSITE of Multnomah's bulk service —
+# it ships ONLY TLNO + PARCEL_NUMBER + SITUS + SITUS_CITY + SITUS_ZIP + TAXCODE
+# + geometry, with owner/valuation/sale/zoning explicitly stripped from the
+# public view by source (per the HFLV description). Rich data lives behind the
+# A&T portal at ascendweb.clackamas.us — ASP.NET WebForms with __VIEWSTATE
+# gating (confirmed via probe; same blocker that lost s1's Accela scrape, s2's
+# MultcoPropTax scrape, and s3's earlier washcotax scrape).
+#
+# What works: (a) Layer 1 inline data (taxlot + parcel_number + situs +
+# situs_city + tax_code) is the source of truth for the address/account
+# snapshot. (b) Verified deep link to ascendweb (account-number search landing
+# is captcha-free; the POST to detail is gated). Owner / valuation / sale /
+# zoning / tax history flagged IN FLIGHT pending viewstate capture.
+#
+# Records: Clackamas County Clerk Recording Division has no public search
+# portal located (recording.clackamas.us 404s; the recording page lists
+# e-Recording submitters but no read surface). Best-effort IN FLIGHT with
+# deep link to the recording division homepage — same posture as Washington.
+#
+# Permits: Clackamas runs its OWN Accela ACA tenant at aca-prod.accela.com/
+# clackamas (NOT the state oregon.gov Accela aca-oregon.accela.com used by
+# Crook/Marion/Jefferson/Lane via fetch_county_permits; AND NOT Washington's
+# permits.washingtoncountyor.gov county-direct instance). So
+# fetch_clackamas_permits is its OWN function — third distinct Accela tenant
+# we cache. Recon also surfaced "Development Direct" (Avolve cloud) at
+# clackamas-or-us.avolvecloud.com which is the submission surface for new
+# permits; aca-prod is the search/lookup surface.
+#
+# IMPORTANT DATA POINT FOR THE BRIEF'S REUSE HYPOTHESIS: the brief flagged
+# Clackamas as "high-probability for direct reuse" of fetch_county_permits.
+# Recon disproves that — Clackamas, like Washington (and likely Multnomah,
+# which uses Portland Maps), runs its own Accela tenant. The pattern appears
+# to be: Tier 1 Flagship counties run county-direct Accela; smaller counties
+# (Crook, Jefferson) use the state ePermitting portal. Carries forward to KB_82.
+# =============================================================================
+
+_CLACK_CACHE_TTL_HOURS = 24
+_CLACK_AT_BASE = "http://ascendweb.clackamas.us"
+_CLACK_AT_ACCOUNT_URL = _CLACK_AT_BASE + "/default.aspx"  # GET with mAccount=... pre-fills field
+_CLACK_PERMITS_BASE = "https://aca-prod.accela.com/clackamas"
+_CLACK_PERMITS_SEARCH = f"{_CLACK_PERMITS_BASE}/Cap/CapHome.aspx?module=Building"
+_CLACK_DEV_DIRECT_HOMEPAGE = "https://clackamas-or-us.avolvecloud.com/Portal/Login/Index/Clackamas-County-OR"
+_CLACK_RECORDING_HOMEPAGE = "https://www.clackamas.us/recording"
+
+
+def fetch_clack_assessment(taxlot: str, force_refresh: bool = False) -> dict:
+    """Clackamas County assessment + property snapshot for a taxlot.
+
+    Built on parcels_clackamas Layer 1 inline data (taxlot, parcel_number,
+    situs, situs_city, situs_zip, tax_code) + geometry-derived acreage
+    (geodesic via ST_Area(::geography); Web Mercator shape_area at source
+    is latitude-distorted). Owner, valuation snapshot, multi-year certified
+    values, sale chain, deed instruments, and tax payment history are IN
+    FLIGHT pending viewstate capture against ascendweb.clackamas.us.
+
+    Returns: {found, taxlot, parcel_number, snapshot{size,address,tax_code},
+              deep_links{at_account_search,at_homepage}, in_flight[],
+              fetched_at, from_cache}
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    if not force_refresh:
+        try:
+            with _conn() as cn, cn.cursor() as cur:
+                cur.execute(
+                    "SELECT taxlot, parcel_number, payload_json, fetched_at, last_error "
+                    "FROM clack_assessment_cache WHERE taxlot = %s",
+                    (taxlot,),
+                )
+                cached = cur.fetchone()
+                if cached:
+                    age = _dt.now(_tz.utc) - cached["fetched_at"]
+                    if age < _td(hours=_CLACK_CACHE_TTL_HOURS) and cached["payload_json"]:
+                        payload = cached["payload_json"]
+                        payload["from_cache"] = True
+                        payload["cached_age_hours"] = round(age.total_seconds() / 3600, 1)
+                        return payload
+        except Exception as e:
+            print(f"[clack_assessment] cache read error: {e}")
+
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """SELECT taxlot, parcel_number, tax_code,
+                          situs_address, situs_city, situs_zip,
+                          ROUND((ST_Area(geom::geography) / 4046.8564224)::numeric, 3) AS acres,
+                          ST_AsText(ST_Centroid(geom)) AS centroid
+                   FROM parcels_clackamas WHERE taxlot = %s LIMIT 1""",
+                (taxlot,),
+            )
+            row = cur.fetchone()
+    except Exception as e:
+        return {"found": False, "reason": f"DB error: {e}", "taxlot": taxlot}
+
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_clackamas", "taxlot": taxlot}
+
+    parcel_number = row["parcel_number"]
+    at_account_url = f"{_CLACK_AT_ACCOUNT_URL}?mAccount={parcel_number}" if parcel_number else _CLACK_AT_ACCOUNT_URL
+
+    payload = {
+        "found": True,
+        "from_cache": False,
+        "taxlot": row["taxlot"],
+        "parcel_number": parcel_number,
+        "snapshot": {
+            "size": {
+                "acres": float(row["acres"]) if row["acres"] is not None else None,
+            },
+            "address": {
+                "situs_address": row["situs_address"],
+                "situs_city": row["situs_city"],
+                "situs_zip": row["situs_zip"],
+            },
+            "tax_code_area": row["tax_code"],
+            "location": {
+                "centroid_wkt": row["centroid"],
+            },
+        },
+        "deep_links": {
+            "at_account_search": at_account_url,
+            "at_homepage": _CLACK_AT_BASE + "/",
+        },
+        "in_flight": [
+            "owner_of_record + mailing_address (ascendweb.clackamas.us is ASP.NET WebForms with __VIEWSTATE-gated PARCEL_NUMBER → property-detail resolution).",
+            "valuation snapshot (land/improvement/M50 assessed) + multi-year certified values (same source).",
+            "sales history + deed instruments (same source — also a 'Records' surface to confirm via fetch_clack_records).",
+            "zoning code + label (Clackamas's public view strips zoning; cmap.clackamas.us is the JS-driven viewer — separate fetch needed).",
+            "tax payment history + current bill status (same source).",
+        ],
+        "source": "parcels_clackamas Layer 1 + ascendweb A&T deep link",
+        "source_url": at_account_url,
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO clack_assessment_cache (taxlot, parcel_number, payload_json, fetched_at, last_error)
+                   VALUES (%s, %s, %s::jsonb, NOW(), NULL)
+                   ON CONFLICT (taxlot) DO UPDATE SET
+                       parcel_number = EXCLUDED.parcel_number,
+                       payload_json = EXCLUDED.payload_json,
+                       fetched_at = NOW(),
+                       last_error = NULL""",
+                (taxlot, parcel_number, _json.dumps(payload, default=str)),
+            )
+            cn.commit()
+    except Exception as e:
+        print(f"[clack_assessment] cache write error: {e}")
+
+    return payload
+
+
+def fetch_clack_records(taxlot: str, force_refresh: bool = False) -> dict:
+    """Clackamas County recorded documents (deeds, mortgages, liens).
+
+    IN FLIGHT — Clackamas County Clerk Recording Division has no public
+    search portal located (recording.clackamas.us 404s; the division page at
+    clackamas.us/recording lists only e-Recording submitter contacts, no read
+    surface). Deed/sale data is NOT inline in parcels_clackamas (the public
+    view strips ownership info). Best path forward: viewstate-captured
+    ascendweb query, or paid-tier subscription, or Simplifile/CSC/ePN
+    integration. Same blocker class as fetch_wash_records / fetch_multco_records.
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                "SELECT taxlot, parcel_number FROM parcels_clackamas WHERE taxlot = %s LIMIT 1",
+                (taxlot,),
+            )
+            row = cur.fetchone()
+    except Exception as e:
+        return {"found": False, "reason": f"DB error: {e}", "taxlot": taxlot}
+
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_clackamas", "taxlot": taxlot}
+
+    parcel_number = row["parcel_number"]
+    at_account_url = f"{_CLACK_AT_ACCOUNT_URL}?mAccount={parcel_number}" if parcel_number else _CLACK_AT_ACCOUNT_URL
+
+    return {
+        "found": True,
+        "in_flight": True,
+        "taxlot": row["taxlot"],
+        "parcel_number": parcel_number,
+        "best_available_from_layer_1": {
+            "note": "Clackamas's hosted Taxlots view explicitly strips owner/sale/deed data (per source description). Use fetch_clack_assessment for size+address snapshot; deed chain is fully IN FLIGHT.",
+        },
+        "in_flight_reason": (
+            "Clackamas County Clerk Recording Division has no public search "
+            "portal located. recording.clackamas.us 404s; the division page "
+            "lists only e-Recording submitter contacts (Simplifile / CSC / ePN), "
+            "no read surface. Best path forward: viewstate-captured ascendweb "
+            "query, paid-tier subscription, or e-Recording vendor integration. "
+            "Pending Iosif decision — same blocker class as fetch_wash_records "
+            "and fetch_multco_records."
+        ),
+        "deep_links": {
+            "at_account_search": at_account_url,
+            "recording_division_homepage": _CLACK_RECORDING_HOMEPAGE,
+        },
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+
+def fetch_clackamas_permits(taxlot: str, force_refresh: bool = False) -> dict:
+    """Building permits for a Clackamas County parcel.
+
+    Clackamas runs its OWN Accela ACA tenant at aca-prod.accela.com/clackamas
+    (DISTINCT from the state oregon.gov Accela used by Crook/Marion/Jefferson/
+    Lane via fetch_county_permits, AND DISTINCT from Washington's
+    permits.washingtoncountyor.gov county-direct instance). New permit
+    submissions live on a separate Avolve cloud surface (Development Direct).
+
+    Same deep-link-only IN FLIGHT pattern as fetch_county_permits and
+    fetch_washington_permits: a verified Accela search URL is returned,
+    scrape upgrade gated on viewstate-capture or Playwright. Cache table is
+    sized for the eventual real payload so the upgrade drops in without
+    schema change.
+
+    Jurisdiction routing: aca-prod.accela.com/clackamas covers Clackamas
+    County (unincorporated) + many of its cities. Oregon City / Lake Oswego /
+    West Linn / Happy Valley / Milwaukie / Wilsonville may run their own
+    portals; v1 surfaces the county Accela deep link and notes per-city
+    routing as IN FLIGHT.
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    if not force_refresh:
+        try:
+            with _conn() as cn, cn.cursor() as cur:
+                cur.execute(
+                    "SELECT taxlot, jurisdiction, permits_json, permit_count, aca_search_url, "
+                    "fetched_at, last_error FROM clack_permits_cache WHERE taxlot = %s",
+                    (taxlot,),
+                )
+                cached = cur.fetchone()
+                if cached:
+                    age = _dt.now(_tz.utc) - cached["fetched_at"]
+                    if age < _td(hours=_CLACK_CACHE_TTL_HOURS):
+                        return {
+                            "found": True,
+                            "from_cache": True,
+                            "cached_age_hours": round(age.total_seconds() / 3600, 1),
+                            "taxlot": taxlot,
+                            "jurisdiction": cached["jurisdiction"],
+                            "status": "deep_link_only",
+                            "permit_count": cached["permit_count"],
+                            "permits": cached["permits_json"] or [],
+                            "deep_links": {
+                                "accela_search": cached["aca_search_url"],
+                                "development_direct": _CLACK_DEV_DIRECT_HOMEPAGE,
+                            },
+                            "in_flight": [
+                                "Server-side scrape of the county Accela result page — gated on viewstate capture or Playwright.",
+                                "Per-city portal routing (Oregon City / Lake Oswego / West Linn / Happy Valley / Milwaukie / Wilsonville) for parcels inside city limits.",
+                            ],
+                            "fetched_at": cached["fetched_at"].isoformat(),
+                        }
+        except Exception as e:
+            print(f"[clack_permits] cache read error: {e}")
+
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                "SELECT taxlot, situs_city FROM parcels_clackamas WHERE taxlot = %s LIMIT 1",
+                (taxlot,),
+            )
+            row = cur.fetchone()
+    except Exception as e:
+        return {"found": False, "reason": f"DB error: {e}", "taxlot": taxlot}
+
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_clackamas", "taxlot": taxlot}
+
+    situs_city = (row["situs_city"] or "").strip().upper()
+    jurisdiction = "Clackamas County (county-direct Accela)"
+    if situs_city == "OREGON CITY":
+        jurisdiction = "Oregon City (city portal likely separate; county Accela may also list)"
+    elif situs_city == "LAKE OSWEGO":
+        jurisdiction = "Lake Oswego (city portal likely separate)"
+    elif situs_city == "WEST LINN":
+        jurisdiction = "West Linn (city portal likely separate)"
+    elif situs_city == "HAPPY VALLEY":
+        jurisdiction = "Happy Valley (city portal likely separate)"
+    elif situs_city == "MILWAUKIE":
+        jurisdiction = "Milwaukie (city portal likely separate)"
+    elif situs_city == "WILSONVILLE":
+        jurisdiction = "Wilsonville (city portal likely separate)"
+
+    payload = {
+        "found": True,
+        "from_cache": False,
+        "taxlot": taxlot,
+        "jurisdiction": jurisdiction,
+        "situs_city": row["situs_city"],
+        "status": "deep_link_only",
+        "permit_count": 0,
+        "permits": [],
+        "deep_links": {
+            "accela_search": _CLACK_PERMITS_SEARCH,
+            "development_direct": _CLACK_DEV_DIRECT_HOMEPAGE,
+        },
+        "in_flight": [
+            "Server-side scrape of the county Accela result page — gated on viewstate capture or Playwright (same blocker as fetch_county_permits for the state portal and fetch_washington_permits for Washington's county Accela).",
+            "Per-city portal routing — Oregon City / Lake Oswego / West Linn / Happy Valley / Milwaukie / Wilsonville may run separate city permit systems; v1 only covers the county Accela.",
+            "Development Direct (Avolve cloud) is the submission surface for NEW permits and not a search surface — the Accela link above is the right deep link for permit history.",
+            "Until the scrape lands: clicking the deep link drops the user on the county's Accela search where pasting the taxlot or address returns the live list in one search submit.",
+        ],
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO clack_permits_cache (taxlot, jurisdiction, permits_json, permit_count, aca_search_url, fetched_at, last_error)
+                   VALUES (%s, %s, '[]'::jsonb, 0, %s, NOW(), NULL)
+                   ON CONFLICT (taxlot) DO UPDATE SET
+                       jurisdiction = EXCLUDED.jurisdiction,
+                       aca_search_url = EXCLUDED.aca_search_url,
+                       fetched_at = NOW(),
+                       last_error = NULL""",
+                (taxlot, jurisdiction, _CLACK_PERMITS_SEARCH),
+            )
+            cn.commit()
+    except Exception as e:
+        print(f"[clack_permits] cache write error: {e}")
+
+    return payload
 
 
 # =============================================================================

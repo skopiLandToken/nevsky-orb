@@ -51,6 +51,9 @@ from .orb_db import (
     fetch_wash_assessment,
     fetch_wash_records,
     fetch_washington_permits,
+    fetch_clack_assessment,
+    fetch_clack_records,
+    fetch_clackamas_permits,
     query_yakov_handoffs,
     query_yakov_commits,
     calculate_lot_yield,
@@ -102,6 +105,9 @@ TIER_TOOLS = {
         "fetch_wash_assessment",
         "fetch_wash_records",
         "fetch_washington_permits",
+        "fetch_clack_assessment",
+        "fetch_clack_records",
+        "fetch_clackamas_permits",
         "query_yakov_handoffs",
         "query_yakov_commits",
         "calculate_lot_yield",
@@ -133,6 +139,9 @@ TIER_TOOLS = {
         "fetch_wash_assessment",
         "fetch_wash_records",
         "fetch_washington_permits",
+        "fetch_clack_assessment",
+        "fetch_clack_records",
+        "fetch_clackamas_permits",
         "calculate_lot_yield",
         "web_search",
     ],
@@ -471,6 +480,42 @@ ALL_TOOL_SCHEMAS = {
             "required": ["taxlot"]
         }
     },
+    "fetch_clack_assessment": {
+        "name": "fetch_clack_assessment",
+        "description": "TERRA: Fetch the Clackamas County assessment + property snapshot for a taxlot. Use when the user asks about a parcel in Oregon City / Lake Oswego / West Linn / Milwaukie / Happy Valley / Wilsonville / unincorporated Clackamas — anywhere in Portland metro south or the Cascade foothills west of Mt Hood. Returns acreage (computed geodesically from geom since the source shape_area is Web Mercator m² and latitude-distorted), parcel_number (8-char Clackamas account #), tax_code area, situs_address / situs_city / situs_zip, parcel centroid, plus verified deep links to the ascendweb A&T portal (account-number search pre-fill) and homepage. IN FLIGHT — flag honestly: owner, valuation snapshot, multi-year certified values, sales history, deed instruments, zoning code/label, and tax payment history all live behind ascendweb.clackamas.us, which is ASP.NET WebForms with __VIEWSTATE-gated PARCEL_NUMBER → property-detail resolution. Same fight as washcotax (Washington), MultcoPropTax (Multnomah), and Crook's Accela scrape — viewstate-equivalent. Until the viewstate scrape or paid-tier lands, surface what we have (size + address + tax code + deep links) and frame the rest as 'coming soon — broker can click through.' FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (🌍 SIZE / 🏠 ADDRESS / 🏷️ TAX CODE / 📍 LOCATION / 🔗 DEEP LINKS). List IN FLIGHT items at end as 'coming soon' — never apologize. Always end with the at_account_search deep link.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Full Clackamas taxlot ID (TLNO, up to 20 chars)."},
+                "force_refresh": {"type": "boolean", "default": False, "description": "Bypass 24h cache and re-pull from parcels_clackamas."}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_clack_records": {
+        "name": "fetch_clack_records",
+        "description": "TERRA: Fetch Clackamas County recorded documents (deeds, mortgages, liens) for a taxlot. CURRENTLY IN FLIGHT — Clackamas County Clerk Recording Division has no public search portal located (recording.clackamas.us 404s; the division page lists only e-Recording submitter contacts — Simplifile / CSC / ePN — no read surface). Clackamas's hosted Taxlots view explicitly strips owner/sale/deed info, so there's no Layer-1 fallback. This fetcher returns IN FLIGHT plus the ascendweb account-search deep link and the Recording Division homepage. FORMATTING: TERRA aesthetic. 📜 emoji header. Frame the IN FLIGHT honestly — 'full chain of title coming once we wire the paid tier or e-Recording vendor' — never apologize, never fabricate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string"},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_clackamas_permits": {
+        "name": "fetch_clackamas_permits",
+        "description": "TERRA: Fetch building permits for a Clackamas County parcel via Clackamas's OWN Accela ACA tenant at aca-prod.accela.com/clackamas. NOT a fetch_county_permits wrapper — Clackamas runs its own county-direct Accela, distinct from BOTH the state oregon.gov Accela (Crook/Marion/Jefferson/Lane) AND Washington's permits.washingtoncountyor.gov instance. Third distinct Accela tenant in TERRA. Same deep-link-only IN FLIGHT pattern: server-side scrape gated on viewstate-capture or Playwright. Also surfaces the Development Direct (Avolve cloud) link for new permit submissions, separate from the search surface. Use when the user asks about permits, building activity, or development status on an Oregon City / Lake Oswego / West Linn / Happy Valley / Milwaukie / Wilsonville / unincorporated Clackamas taxlot. JURISDICTION NOTE — the per-city portals (Oregon City / Lake Oswego / West Linn / Happy Valley / Milwaukie / Wilsonville) may host city-only permits separately; v1 only covers the county Accela. Per-city portal routing is IN FLIGHT. FORMATTING: TERRA aesthetic. 🚧 emoji header. Frame the Accela deep link as 'one tap from the live county portal.' Surface the jurisdiction note + Development Direct link so brokers know where to look for newer applications.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Full Clackamas taxlot ID (TLNO format)."},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot"]
+        }
+    },
     "calculate_lot_yield": {
         "name": "calculate_lot_yield",
         "description": "TERRA — SPECULATIVE residential lot-yield analysis. Verify with planning office before quoting. Computes a rough estimate of how many residential lots could theoretically be carved from a Deschutes County parcel and (optionally) the gross retail value if the broker provides a per-lot market estimate. CALL when a broker asks 'how many lots can I get on parcel X', 'what's parcel X worth as a development', 'what's the yield on this taxlot', or after a TERRA SCAN COMPLETE on a residential parcel ≥1.0 acre. INPUTS: parcel_id (taxlot string, required). Optional: deduction_override (0-1 fraction for roads/utilities/setbacks; default 0.25 = 25%), per_lot_value_override (USD per finished lot — broker's own market number; if omitted, the tool returns a yield-only result and prompts the broker for their estimate), target_zone_override (force a different zone for what-if rezone scenarios). BEHAVIOR: (a) if the parcel has no zoning on file, the tool live-queries the county GIS service and caches the result — adds ~500ms latency but completes the call. (b) Non-residential zones return an informational dict (not an error) noting yield-calc doesn't apply. (c) Zones outside the seed lookup return a structured error with guidance — NO fake numbers. (d) Every result carries a footer disclaimer: 'TERRA estimate — actual yield subject to site conditions, plat approval, and jurisdictional review. Verify with the city/county planning office before underwriting.' DOCTRINE: per DOCTRINE-TERRA-ANALYSIS-TOOL-01, this tool is speculative analysis only — never quote outputs as certified yield or appraised value. Per DOCTRINE-YIELD-HOOK-THEN-CLOSE-01, the v1 output is the broker hook; v2 'deep dive' refinement (setbacks, slope, wetlands) comes later. FORMATTING for Sophia's reply: render the result as a TERRA card with the broker-friendly numbers up front (lot_yield, gross_retail if available), then assumptions, then the footer. NEVER omit the footer.",
@@ -541,6 +586,9 @@ LOCAL_TOOL_FUNCTIONS = {
     "fetch_wash_assessment": fetch_wash_assessment,
     "fetch_wash_records": fetch_wash_records,
     "fetch_washington_permits": fetch_washington_permits,
+    "fetch_clack_assessment": fetch_clack_assessment,
+    "fetch_clack_records": fetch_clack_records,
+    "fetch_clackamas_permits": fetch_clackamas_permits,
     "get_site_plans": get_site_plans,
     "get_ai_spend_today": get_ai_spend_today,
     "query_yakov_handoffs": query_yakov_handoffs,
