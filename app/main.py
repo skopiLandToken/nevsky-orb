@@ -10,6 +10,7 @@ import json
 from datetime import datetime, timezone, timedelta
 import re
 import psycopg
+from psycopg.rows import dict_row as _terra_dict_row
 import httpx
 import redis as _yindo_redis_module
 from anthropic import Anthropic
@@ -331,6 +332,97 @@ def _terra_extract_taxlot(reply_text: str) -> str | None:
         return m.group(1)
     return None
 
+def _terra_check_yield_eligibility(taxlot: str) -> dict:
+    """Decide whether to show the YIELD CALC button on a parcel card.
+
+    Per DOCTRINE-YIELD-HOOK-THEN-CLOSE-01 (amended 2026-05-27) + Iosif's Phase 3
+    button-firing condition:
+      - parcel has zone_code (Phase 0B fallback attempted if NULL)
+      - AND zoning_lookup row exists for (jurisdiction, zone_code)
+      - AND is_residential=true
+      - AND min_lot_sqft IS NOT NULL
+      - AND gross_acres >= 1.0
+    Returns {eligible: bool, reason: str, ...metadata}. Single-query happy path;
+    extra round-trips only on the fallback path.
+    """
+    sql_combined = """
+        SELECT p.shape_area / 43560.0 AS acres,
+               p.zone_code, p.zone_jurisdiction,
+               ST_Y(ST_Centroid(p.geom)) AS lat,
+               ST_X(ST_Centroid(p.geom)) AS lon,
+               zl.is_residential, zl.min_lot_sqft
+        FROM parcels_deschutes p
+        LEFT JOIN zoning_lookup zl
+          ON zl.jurisdiction = p.zone_jurisdiction AND zl.zone_code = p.zone_code
+        WHERE p.taxlot = %s
+    """
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(row_factory=_terra_dict_row) as cur:
+                cur.execute(sql_combined, (taxlot,))
+                row = cur.fetchone()
+    except Exception as e:
+        print(f"[terra_eligibility] db error: {e}")
+        return {"eligible": False, "reason": "db_error"}
+
+    if not row:
+        return {"eligible": False, "reason": "parcel_not_found"}
+
+    acres = float(row["acres"] or 0)
+    if acres < 1.0:
+        return {"eligible": False, "reason": "acres_below_gate", "acres": acres}
+
+    zone_code = row["zone_code"]
+    zone_juris = row["zone_jurisdiction"]
+    is_res = row["is_residential"]
+    min_lot = row["min_lot_sqft"]
+
+    # Phase 0B fallback — live-query at SCAN COMPLETE if no zoning on file.
+    if not zone_code:
+        try:
+            live = _live_query_zoning(row["lat"], row["lon"])
+        except Exception as e:
+            print(f"[terra_eligibility] live query failed: {e}")
+            live = None
+        if not live or not live.get("zone"):
+            return {"eligible": False, "reason": "no_zoning_after_fallback", "acres": acres}
+        zone_code = live["zone"]
+        zone_juris = live["zone_jurisdiction"]
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor(row_factory=_terra_dict_row) as cur:
+                    cur.execute(
+                        """UPDATE parcels_deschutes
+                           SET zone_code=%s, zone_jurisdiction=%s,
+                               zone_community_class=%s, zone_resolved_at=now()
+                           WHERE taxlot=%s AND zone_code IS NULL""",
+                        (zone_code, zone_juris, live.get("community_class"), taxlot),
+                    )
+                    cur.execute(
+                        """SELECT is_residential, min_lot_sqft FROM zoning_lookup
+                           WHERE jurisdiction=%s AND zone_code=%s""",
+                        (zone_juris, zone_code),
+                    )
+                    zl = cur.fetchone()
+                    conn.commit()
+        except Exception as e:
+            print(f"[terra_eligibility] cache backfill failed: {e}")
+            zl = None
+        if not zl:
+            return {"eligible": False, "reason": "no_lookup_after_fallback", "acres": acres,
+                    "zone_code": zone_code, "zone_jurisdiction": zone_juris}
+        is_res, min_lot = zl["is_residential"], zl["min_lot_sqft"]
+
+    if is_res is None:
+        return {"eligible": False, "reason": "no_lookup_row", "acres": acres,
+                "zone_code": zone_code, "zone_jurisdiction": zone_juris}
+    if not is_res or not min_lot:
+        return {"eligible": False, "reason": "not_residential", "acres": acres,
+                "zone_code": zone_code, "zone_jurisdiction": zone_juris}
+    return {"eligible": True, "acres": acres, "zone_code": zone_code,
+            "zone_jurisdiction": zone_juris, "min_lot_sqft": int(min_lot)}
+
+
 def _terra_build_parcel_keyboard(taxlot: str, property_id: str | None = None) -> dict:
     """Build the inline_keyboard for a TERRA parcel card."""
     kb_rows = [
@@ -343,12 +435,163 @@ def _terra_build_parcel_keyboard(taxlot: str, property_id: str | None = None) ->
             {"text": "📁 DEV DOCS", "callback_data": f"parcel_devdocs:{taxlot}"},
         ],
     ]
+    # 💡 YIELD CALC — residential ≥1.0 ac, eligibility-gated.
+    # Per DOCTRINE-YIELD-HOOK-THEN-CLOSE-01: hook (v1) is the broker hook.
+    try:
+        if _TERRA_DIAL_AVAILABLE:
+            _yield = _terra_check_yield_eligibility(taxlot)
+            if _yield.get("eligible"):
+                kb_rows.append([
+                    {"text": "💡 YIELD CALC", "callback_data": f"parcel_yield:{taxlot}"}
+                ])
+    except Exception as _yield_err:
+        print(f"[parcel_keyboard] yield eligibility check failed: {_yield_err}")
     # Direct-to-DIAL url button (no AI roundtrip — instant browser jump)
     if property_id:
         kb_rows.append([
             {"text": "📋 OPEN DIAL", "url": f"http://dial.deschutes.org/Real/Index/{property_id}"}
         ])
     return {"inline_keyboard": kb_rows}
+
+
+def _terra_format_yield_card(result: dict) -> str:
+    """Render a calculate_lot_yield result as a TERRA card with mandatory footer.
+
+    Per DOCTRINE-TERRA-ANALYSIS-TOOL-01: footer disclaimer is non-removable.
+    """
+    footer = result.get("footer", "")
+    parcel = result.get("parcel_id", "?")
+
+    if result.get("error"):
+        return (
+            "💡 *TERRA YIELD CALC*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Parcel: `{parcel}`\n\n"
+            f"⚠️ {result['error']}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"_{footer}_"
+        )
+
+    if result.get("is_residential") is False:
+        return (
+            "💡 *TERRA YIELD CALC*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Parcel: `{parcel}`\n"
+            f"Zoning: `{result.get('zone_code')}` ({result.get('zone_jurisdiction')})\n"
+            f"_{result.get('zone_label', '')}_\n\n"
+            f"ℹ️ {result.get('message','')}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"_{footer}_"
+        )
+
+    deduction_pct = int(round(result["assumptions_used"]["deduction_pct"] * 100))
+    lines = [
+        "🔥 *TERRA YIELD CALCULATION* 🔥",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"Parcel: `{parcel}`",
+        f"Zoning: `{result['zone_code']}` ({result['zone_jurisdiction']})",
+        f"_{result.get('zone_label', '')}_",
+        "",
+        f"📐 Gross: *{result['gross_acres']}* acres",
+        f"✂️ Usable ({deduction_pct}% deduction): *{result['usable_acres']}* ac · {result['usable_sqft']:,} sqft",
+        f"📏 Min lot: *{result['min_lot_sqft']:,}* sqft",
+        "",
+        f"◆ *ROUGH YIELD: {result['lot_yield']} lots* ◆",
+    ]
+    if result.get("gross_retail") is not None and result.get("per_lot_value"):
+        lines.append(
+            f"◆ *EST. RETAIL: ${result['gross_retail']:,.0f}* @ ${result['per_lot_value']:,.0f}/lot ◆"
+        )
+    elif result.get("per_lot_value_prompt_needed"):
+        lines.extend(["", "💵 _Tap ADD LOT VALUE below — your number, your market._"])
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    src = result.get("source_section") or "planning office"
+    lines.append(f"Source: {src}")
+    if result.get("verified") is False:
+        lines.append("_(zoning numbers spec-derived; verify against current ordinance)_")
+    lines.extend(["", f"_{footer}_"])
+    return "\n".join(lines)
+
+
+def _terra_build_yield_card_keyboard(result: dict) -> dict:
+    """Keyboard for the YIELD card itself. Adds ADD LOT VALUE when retail line missing."""
+    rows = []
+    if result.get("per_lot_value_prompt_needed"):
+        rows.append([
+            {"text": "💵 ADD LOT VALUE",
+             "callback_data": f"parcel_yield_setval:{result.get('parcel_id')}"}
+        ])
+    return {"inline_keyboard": rows} if rows else {"inline_keyboard": []}
+
+
+_TERRA_VALUE_RE = _terra_re.compile(r"^\s*\$?\s*([\d]{1,3}(?:[,\s]\d{3})*|\d+)(?:\.(\d+))?\s*([kKmM])?\s*$")
+
+
+def _terra_parse_per_lot_value(text: str) -> float | None:
+    """Parse '$150,000', '150000', '150K', '150k', '1.5M' → float USD. None if not a value."""
+    if not text:
+        return None
+    m = _TERRA_VALUE_RE.match(text.strip())
+    if not m:
+        return None
+    whole = m.group(1).replace(",", "").replace(" ", "")
+    frac = m.group(2) or ""
+    mult = (m.group(3) or "").lower()
+    try:
+        n = float(f"{whole}.{frac}" if frac else whole)
+    except ValueError:
+        return None
+    if mult == "k":
+        n *= 1000
+    elif mult == "m":
+        n *= 1_000_000
+    # Sanity bound: typical lot values $5k (dirt-cheap rural) to $5M (Aspen-tier)
+    if n < 1000 or n > 50_000_000:
+        return None
+    return n
+
+
+def _terra_check_pending_yield_value(chat_id: int, text: str) -> dict | None:
+    """If the chat has an active ADD-LOT-VALUE pending row AND `text` parses as a
+    USD value, run calculate_lot_yield with the override, delete the pending row,
+    and return {result, card_text, keyboard}. Otherwise return None.
+    """
+    if not chat_id or not text:
+        return None
+    val = _terra_parse_per_lot_value(text)
+    if val is None:
+        return None
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(row_factory=_terra_dict_row) as cur:
+                cur.execute(
+                    """DELETE FROM terra_pending_yield_value
+                       WHERE chat_id=%s AND expires_at > now()
+                       RETURNING taxlot""",
+                    (chat_id,),
+                )
+                row = cur.fetchone()
+                # Opportunistic GC of expired rows
+                cur.execute("DELETE FROM terra_pending_yield_value WHERE expires_at <= now()")
+                conn.commit()
+    except Exception as e:
+        print(f"[terra_pending] db error: {e}")
+        return None
+    if not row:
+        return None
+    taxlot = row["taxlot"]
+    try:
+        result = calculate_lot_yield(taxlot, per_lot_value_override=val)
+    except Exception as e:
+        print(f"[terra_pending] yield calc error: {e}")
+        return None
+    return {
+        "taxlot": taxlot,
+        "value": val,
+        "result": result,
+        "card_text": _terra_format_yield_card(result),
+        "keyboard": _terra_build_yield_card_keyboard(result),
+    }
 
 def _terra_extract_property_id(reply_text: str) -> str | None:
     """Pull the DIAL property_id from the reply if present (in dial_url)."""
@@ -368,6 +611,8 @@ try:
         fetch_dial_sales,
         fetch_dial_valuation,
         fetch_dial_dev_docs,
+        calculate_lot_yield,
+        _live_query_zoning,
     )
     _TERRA_DIAL_AVAILABLE = True
 except ImportError as _e:
@@ -2568,6 +2813,74 @@ async def process_telegram_callback_query(callback_query: dict, response_bot_tok
                 await answer_telegram_callback_query(callback_query_id, "No taxlot in callback data.")
             return {"ok": False, "reason": "missing_taxlot"}
 
+        # ── Phase 3: YIELD CALC + ADD LOT VALUE handlers ─────────────────
+        if action == "parcel_yield":
+            if callback_query_id:
+                await answer_telegram_callback_query(callback_query_id, "💡 Running yield calc…")
+            try:
+                _yield_result = calculate_lot_yield(taxlot)
+            except Exception as _y_err:
+                print(f"[parcel_yield] calc error: {_y_err}")
+                if chat_id:
+                    await send_telegram_message(chat_id, f"⚠️ Yield calc error: {_y_err}")
+                return {"ok": False, "reason": "yield_calc_error"}
+            _card = _terra_format_yield_card(_yield_result)
+            _kb = _terra_build_yield_card_keyboard(_yield_result)
+            from_user = callback_query.get("from", {}) or {}
+            _sender = str(from_user.get("id", ""))
+            _is_dan = callable(globals().get("is_dan")) and is_dan(_sender)
+            try:
+                if _is_dan:
+                    await send_ophelia_message_with_markup(chat_id, _card, _kb)
+                else:
+                    await send_sophia_message_with_markup(chat_id, _card, _kb)
+            except Exception as _send_err:
+                print(f"[parcel_yield] send error: {_send_err}")
+                if chat_id:
+                    await send_telegram_message(chat_id, _card)
+            return {"ok": True, "action": action, "taxlot": taxlot,
+                    "lot_yield": _yield_result.get("lot_yield")}
+
+        if action == "parcel_yield_setval":
+            if callback_query_id:
+                await answer_telegram_callback_query(callback_query_id, "💵 Reply with your $/lot…")
+            # Persist a pending row; broker's next numeric reply triggers re-render.
+            try:
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        # Replace any existing pending row for this chat (one in-flight at a time).
+                        cur.execute("DELETE FROM terra_pending_yield_value WHERE chat_id=%s", (chat_id,))
+                        cur.execute(
+                            """INSERT INTO terra_pending_yield_value (chat_id, taxlot)
+                               VALUES (%s, %s)""",
+                            (chat_id, taxlot),
+                        )
+                        conn.commit()
+            except Exception as _pend_err:
+                print(f"[parcel_yield_setval] db error: {_pend_err}")
+                if chat_id:
+                    await send_telegram_message(chat_id, "⚠️ Couldn't queue the value prompt. Try the YIELD CALC button again.")
+                return {"ok": False, "reason": "pending_insert_failed"}
+            _prompt = (
+                "💵 *Reply with your per-lot value*\n\n"
+                "Just type a plain number — e.g. `150000`, `$150,000`, or `150K`. "
+                "I'll re-run the yield with retail dollars.\n\n"
+                f"_Parcel:_ `{taxlot}`  ·  _expires in 5 min_\n\n"
+                "_Your number, your market — TERRA doesn't pretend to know it better._"
+            )
+            from_user = callback_query.get("from", {}) or {}
+            _sender = str(from_user.get("id", ""))
+            _is_dan = callable(globals().get("is_dan")) and is_dan(_sender)
+            try:
+                if _is_dan:
+                    await send_ophelia_message(chat_id, _prompt)
+                else:
+                    await send_sophia_message(chat_id, _prompt)
+            except Exception as _send_err:
+                print(f"[parcel_yield_setval] send error: {_send_err}")
+            return {"ok": True, "action": action, "taxlot": taxlot, "pending": True}
+        # ── END Phase 3 yield handlers ───────────────────────────────────
+
         # Acknowledge the tap immediately (Telegram shows loading toast)
         ack_msg = {
             "parcel_permits":   "🔥 Scanning permits…",
@@ -3696,6 +4009,25 @@ async def sophia_webhook(request: Request):
     # === END OWNER CHECK (sophia) ===
 
 
+    # === Phase 3: TERRA pending YIELD value short-circuit (sophia) ===
+    # If the broker just tapped 💵 ADD LOT VALUE and is replying with a number,
+    # bypass Sophia's LLM and render the re-calculated card directly.
+    if chat_id and _TERRA_DIAL_AVAILABLE:
+        try:
+            _pending = _terra_check_pending_yield_value(chat_id, text)
+        except Exception as _pe:
+            print(f"[sophia_webhook] pending yield check error: {_pe}")
+            _pending = None
+        if _pending:
+            try:
+                await send_sophia_message_with_markup(chat_id, _pending["card_text"], _pending["keyboard"])
+            except Exception as _se:
+                print(f"[sophia_webhook] pending yield send error: {_se}")
+                await send_sophia_message(chat_id, _pending["card_text"])
+            return {"ok": True, "terra_yield_recalc": True,
+                    "taxlot": _pending["taxlot"], "value": _pending["value"]}
+    # === END Phase 3 short-circuit ===
+
     # === ENGINE ROUTING (E2 Step 2, sophia, 2026-04-28) ===
     # === TERRA LOCATION PIN (sophia, 2026-04-28) ===
     _location = message.get("location") or {}
@@ -3787,6 +4119,22 @@ async def ophelia_webhook(request: Request):
         print(f"[ophelia_webhook] owner check error: {_owner_err}")
     # === END OWNER CHECK (ophelia) ===
 
+    # === Phase 3: TERRA pending YIELD value short-circuit (ophelia) ===
+    if chat_id and _TERRA_DIAL_AVAILABLE:
+        try:
+            _pending = _terra_check_pending_yield_value(chat_id, text)
+        except Exception as _pe:
+            print(f"[ophelia_webhook] pending yield check error: {_pe}")
+            _pending = None
+        if _pending:
+            try:
+                await send_ophelia_message_with_markup(chat_id, _pending["card_text"], _pending["keyboard"])
+            except Exception as _se:
+                print(f"[ophelia_webhook] pending yield send error: {_se}")
+                await send_ophelia_message(chat_id, _pending["card_text"])
+            return {"ok": True, "terra_yield_recalc": True,
+                    "taxlot": _pending["taxlot"], "value": _pending["value"]}
+    # === END Phase 3 short-circuit ===
 
     # === ENGINE ROUTING (E2 Step 2, ophelia, 2026-04-28) ===
     # === TERRA LOCATION PIN (ophelia, 2026-04-28) ===
