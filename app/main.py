@@ -296,7 +296,7 @@ def _terra_extract_property_id(reply_text: str) -> str | None:
     """Pull the DIAL property_id from the reply if present (in dial_url)."""
     if not reply_text:
         return None
-    m = _terra_re.search(r"dial\.deschutes\.org/Real/Index/(\d+)", reply_text)
+    m = _terra_re.search(r"dial\.deschutes\.org/Real/[A-Za-z]+/(\d+)", reply_text)
     if m:
         return m.group(1)
     return None
