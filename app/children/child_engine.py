@@ -86,6 +86,9 @@ from .orb_db import (
     fetch_lincoln_permits,
     query_yakov_handoffs,
     query_yakov_commits,
+    fetch_jefferson_assessment,
+    fetch_jefferson_records,
+    fetch_jefferson_permits,
     calculate_lot_yield,
 )
 
@@ -115,6 +118,9 @@ TIER_TOOLS = {
         "get_recent_yakov_tasks", "get_site_plans",
         "get_ai_spend_today",
         "lookup_parcel_by_point",
+        "fetch_jefferson_assessment",
+        "fetch_jefferson_records",
+        "fetch_jefferson_permits",
         "fetch_dial_permits",
         "fetch_dial_sales",
         "fetch_dial_valuation",
@@ -179,6 +185,9 @@ TIER_TOOLS = {
         "get_active_users",
         "get_recent_yakov_tasks", "get_site_plans",
         "lookup_parcel_by_point",
+        "fetch_jefferson_assessment",
+        "fetch_jefferson_records",
+        "fetch_jefferson_permits",
         "fetch_dial_permits",
         "fetch_dial_sales",
         "fetch_dial_valuation",
@@ -918,6 +927,33 @@ ALL_TOOL_SCHEMAS = {
             "required": ["taxlot"]
         }
     },
+    "fetch_jefferson_assessment": {
+        "name": "fetch_jefferson_assessment",
+        "description": "TERRA: Fetch the Jefferson County assessment + ownership + situs snapshot for a taxlot (Madras / Culver / Metolius / Crooked River Ranch / unincorporated — completes the Central Oregon trio with Deschutes + Crook). Use when the user asks about a Jefferson parcel. Source is the Deschutes-hosted COFSA Jefferson Taxlots aggregator (the ODF statewide overlay has /query DISABLED — Map-only capability), pure SQL pass-through over parcels_jefferson L1 inline — NO scraper, NO HTTP per call. Ships: owner (single OWNER line, 100% populated), situs (HOUSE/STREET/CITY/ZIP composed, ~69% populated), MAPTAXLOT, and GEOMETRY-DERIVED geodesic acreage. CRITICAL: COFSA ships ACRES 0% populated, so acreage is computed from the parcel polygon (ST_Area geodesic) — accurate to geometry but NOT the assessor's stated legal acreage; always label it 'geometry-derived'. IN FLIGHT — flag honestly, NEVER invent: VALUATION (no assessed/RMV in COFSA — broker pulls from jeffersoncountyor.gov/assessor); RECORDED INSTRUMENT / sale price (not in source — see fetch_jefferson_records); owner stack beyond primary, mailing, PLSS section, property class (columns exist Yamhill-family but COFSA leaves NULL — surface if backfilled); ZONING (no Jefferson zoning service located yet, Jackson-pattern ingest queued). FORMATTING: TERRA SCAN aesthetic. NO markdown tables (pipes render raw). Section headers with emoji (👤 OWNER / 🏠 SITUS / 🧾 ACCOUNT / 🌍 ACREAGE / 🔗 DEEP LINKS). Surface owner + situs + geodesic acreage prominently; label acreage honestly. End with the assessor deep link as the broker hand-off for live valuation. Never apologize, never fabricate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_jefferson_records": {
+        "name": "fetch_jefferson_records",
+        "description": "TERRA: Fetch the Jefferson County owner-of-record snapshot for a taxlot. Use when the user asks about deeds, recorded documents, or current ownership of a Jefferson parcel. Returns the current owner of record from parcels_jefferson L1 inline (COFSA) plus deep links to the Jefferson County Clerk and Assessor surfaces. IN FLIGHT — flag honestly: the FULL recorded-instrument chain of title (deed history, instrument numbers, recording dates, sale price) is NOT exposed by the COFSA Jefferson Taxlots layer — no instrument fields in source. The Jefferson County Clerk surface is the broker hand-off until a structured recording source is wired. FORMATTING: TERRA aesthetic. 📜 emoji header. Lead with owner_of_record, then surface the clerk_records deep link. Frame the IN FLIGHT as 'full recorded chain is one tap from the County Clerk' — never apologize, never fabricate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_jefferson_permits": {
+        "name": "fetch_jefferson_permits",
+        "description": "TERRA: Fetch building permits for a Jefferson County parcel via Oregon's state ePermitting portal (Accela ACA). One-line wrapper around fetch_county_permits('031') — Jefferson is Tier 3. FIPS 031 was added to _OREGON_EPERMITTING_FIPS during the Crook ship, so all Jefferson jurisdictions — Madras, Culver, Metolius, and unincorporated Jefferson — route through aca-oregon.accela.com/oregon. IN FLIGHT — same deep-link-only pattern as every other state-Accela county: server-side scrape gated on viewstate capture / Playwright. FORMATTING: TERRA aesthetic. 🚧 emoji header. Surface jurisdiction ('Jefferson County — Oregon state Accela; Tier 3 reuse pattern') and the accela_search deep link as 'one tap from the live state portal.'",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
     "calculate_lot_yield": {
         "name": "calculate_lot_yield",
         "description": "TERRA — SPECULATIVE residential lot-yield analysis. Verify with planning office before quoting. Computes a rough estimate of how many residential lots could theoretically be carved from a Deschutes County parcel and (optionally) the gross retail value if the broker provides a per-lot market estimate. CALL when a broker asks 'how many lots can I get on parcel X', 'what's parcel X worth as a development', 'what's the yield on this taxlot', or after a TERRA SCAN COMPLETE on a residential parcel ≥1.0 acre. INPUTS: parcel_id (taxlot string, required). Optional: deduction_override (0-1 fraction for roads/utilities/setbacks; default 0.25 = 25%), per_lot_value_override (USD per finished lot — broker's own market number; if omitted, the tool returns a yield-only result and prompts the broker for their estimate), target_zone_override (force a different zone for what-if rezone scenarios). BEHAVIOR: (a) if the parcel has no zoning on file, the tool live-queries the county GIS service and caches the result — adds ~500ms latency but completes the call. (b) Non-residential zones return an informational dict (not an error) noting yield-calc doesn't apply. (c) Zones outside the seed lookup return a structured error with guidance — NO fake numbers. (d) Every result carries a footer disclaimer: 'TERRA estimate — actual yield subject to site conditions, plat approval, and jurisdictional review. Verify with the city/county planning office before underwriting.' DOCTRINE: per DOCTRINE-TERRA-ANALYSIS-TOOL-01, this tool is speculative analysis only — never quote outputs as certified yield or appraised value. Per DOCTRINE-YIELD-HOOK-THEN-CLOSE-01, the v1 output is the broker hook; v2 'deep dive' refinement (setbacks, slope, wetlands) comes later. FORMATTING for Sophia's reply: render the result as a TERRA card with the broker-friendly numbers up front (lot_yield, gross_retail if available), then assumptions, then the footer. NEVER omit the footer.",
@@ -1025,6 +1061,9 @@ LOCAL_TOOL_FUNCTIONS = {
     "get_ai_spend_today": get_ai_spend_today,
     "query_yakov_handoffs": query_yakov_handoffs,
     "query_yakov_commits": query_yakov_commits,
+    "fetch_jefferson_assessment": fetch_jefferson_assessment,
+    "fetch_jefferson_records": fetch_jefferson_records,
+    "fetch_jefferson_permits": fetch_jefferson_permits,
     "calculate_lot_yield": calculate_lot_yield,
 }
 

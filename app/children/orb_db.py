@@ -269,6 +269,31 @@ def get_ai_spend_today() -> dict:
 # =============================================================================
 
 COUNTY_REGISTRY = {
+    "031": {  # Jefferson (FIPS 41-031) — Tier 3, completes the Central Oregon trio (Deschutes + Crook)
+        "name": "Jefferson",
+        # bbox: Madras / Metolius / Culver / Camp Sherman / Crooked River Ranch / Three Rivers / Ashwood.
+        # Warm Springs Reservation (sovereign tribal land) is largely excluded from county taxlot
+        # publication; a pin-drop deep in the reservation returning not-in-coverage is correct, not a bug.
+        "bbox": (44.30, 45.10, -121.80, -120.50),
+        "query": """
+            SELECT taxlot,
+                   maptaxlot AS section_id,
+                   -- COFSA carries no native acreage (ACRES column empty); derive geodesically.
+                   ROUND((ST_Area(geom::geography) / 4046.8564224)::numeric, 3) AS acres,
+                   'https://www.jeffersoncountyor.gov/assessor'::text AS county_url,
+                   maptaxlot AS map_number,
+                   owner_line1 AS owner_name,
+                   site_add_nam AS situs_address,
+                   NULL::text AS zone_code,
+                   NULL::text AS zone_label,
+                   ST_AsText(ST_Centroid(geom)) AS parcel_centroid,
+                   'Jefferson'::text AS county_name,
+                   '031'::text AS county_fips
+            FROM parcels_jefferson
+            WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            LIMIT 1
+        """,
+    },
     "017": {  # Deschutes (FIPS 41-017)
         "name": "Deschutes",
         # bbox: (lat_min, lat_max, lon_min, lon_max)
@@ -4726,4 +4751,11 @@ from .lincoln_terra import (  # noqa: E402
     fetch_lincoln_assessment,
     fetch_lincoln_records,
     fetch_lincoln_permits,
+)
+
+
+from .jefferson_terra import (  # noqa: E402
+    fetch_jefferson_assessment,
+    fetch_jefferson_records,
+    fetch_jefferson_permits,
 )
