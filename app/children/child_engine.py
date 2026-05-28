@@ -63,6 +63,9 @@ from .orb_db import (
     fetch_benton_assessment,
     fetch_benton_records,
     fetch_benton_permits,
+    fetch_yamhill_assessment,
+    fetch_yamhill_records,
+    fetch_yamhill_permits,
     fetch_polk_assessment,
     fetch_polk_records,
     fetch_polk_permits,
@@ -129,6 +132,9 @@ TIER_TOOLS = {
         "fetch_benton_assessment",
         "fetch_benton_records",
         "fetch_benton_permits",
+        "fetch_yamhill_assessment",
+        "fetch_yamhill_records",
+        "fetch_yamhill_permits",
         "fetch_polk_assessment",
         "fetch_polk_records",
         "fetch_polk_permits",
@@ -175,6 +181,9 @@ TIER_TOOLS = {
         "fetch_benton_assessment",
         "fetch_benton_records",
         "fetch_benton_permits",
+        "fetch_yamhill_assessment",
+        "fetch_yamhill_records",
+        "fetch_yamhill_permits",
         "fetch_polk_assessment",
         "fetch_polk_records",
         "fetch_polk_permits",
@@ -654,6 +663,36 @@ ALL_TOOL_SCHEMAS = {
             "required": ["taxlot"]
         }
     },
+    "fetch_yamhill_assessment": {
+        "name": "fetch_yamhill_assessment",
+        "description": "TERRA: Fetch the Yamhill County assessment + ownership snapshot for a taxlot (McMinnville / Newberg / Dundee / Carlton / Lafayette / Dayton / Sheridan / Willamina / Yamhill / Amity / unincorporated). Use when the user asks about a parcel in Willamette Valley wine country — Yamhill is THE Oregon vineyard county (Dundee Hills AVA + Eola-Amity Hills AVA + Yamhill-Carlton AVA + McMinnville AVA + Van Duzer Corridor AVA). Yamhill's Landowners feed is POLK-RICH on owner data: source ships joined parcel + assessor account attrs in ONE row, with OWNERLINE1 + OWNERLINE2 + OWNERLINE3 inline so trusts / family-LLC vineyard parcels surface all owners without an explosion table or scraper. Returns up-to-three owner names, full mailing block, situs (street + city + zip), PLSS-derived section_id (township-range-section + quarter-quarter), most-recent recording snapshot (instrument id / type / year / month — source ships no day, no sale price), acreage (polygon native + foot conversion), and account number. NO scraper, NO viewstate gating, NO HTTP per call — pure SQL pass-through over parcels_yamhill. IN FLIGHT — flag honestly, do not invent: NO valuation in source (Yamhill's feed exposes neither assessed nor RMV — broker pulls valuation via the account number at yamhillcounty.gov/assessor); property class PRPCLASS and description PRPCLSDSC are SCHEMA-PRESENT but empty for 100% of rows (vineyard / EFU / AF detection therefore surfaces via owner_line1 wine-LLC keyword scan + situs_city in AMITY / DUNDEE / DAYTON rather than via class fields); per-parcel REFLink schema-present but empty for 100% of rows; building details (year built / sqft / bed / bath) not exposed; Yamhill zoning service not yet located/ingested (Jackson-pattern follow-up); AGENTNAME field present but never populated. FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (👤 OWNER — surface all_owners not just primary when owner_count > 1 / 🏠 SITUS / 🧾 ACCOUNT / 🌍 ACREAGE / 📜 LATEST RECORDING / 🔗 DEEP LINKS). When owner_line1 contains WINE / WINERY / VINEYARD / WINES / CELLARS, ADD A 🍇 VINEYARD header surfacing the wine-business identity before 💰 VALUATION (which is IN FLIGHT). End with the assessor_home + maps_portal deep links as broker hand-off.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Yamhill ORTaxlot (29-char canonical OR format, e.g. '3604.00S04.00W21BC--000000800' for the Yamhill County Courthouse) or MapTaxlot."},
+                "force_refresh": {"type": "boolean", "default": False, "description": "Currently no-op — Yamhill L2 is a SQL pass-through over L1 inline; freshness comes from the daily L1 delta refresh."}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_yamhill_records": {
+        "name": "fetch_yamhill_records",
+        "description": "TERRA: Fetch the Yamhill County deed / recorded-instrument snapshot for a taxlot. Use when the user asks about deeds, recent transfer, recorded documents, or 'what was the last instrument on this Yamhill parcel'. Returns the MOST-RECENT instrument-of-record (instrument_id, type, year, month — source ships no day, synthesizes an ISO date as YYYY-MM-01; source ships NO recorded sale price), the current owners of record (up to three lines per source — multi-trustee / family-LLC vineyard parcels surface all owners), and deep links to the Yamhill County Clerk + assessor + ArcGIS maps portal. IN FLIGHT — flag honestly: multi-instrument deed chain (only the latest is in L1; full chain via the County Clerk portal — per-account deep link not yet captured, clerk_home is the surface); recorded sale price (not exposed by the public feed — sale chain lives behind the per-account assessor portal); instrument type (often blank in INSTTYPE source column, surface what's there and leave type null when missing). FORMATTING: TERRA aesthetic. 📜 emoji header. Lead with latest_instrument (instrument_id / type / year-month), then owners_of_record (surface all three owner lines when present), then the clerk_home deep link. Frame the IN FLIGHT as 'full chain of title is one tap from the County Clerk' — never apologize, never fabricate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_yamhill_permits": {
+        "name": "fetch_yamhill_permits",
+        "description": "TERRA: Fetch building permits for a Yamhill County parcel via Oregon's state ePermitting portal (Accela ACA). One-line wrapper around fetch_county_permits('071') — Yamhill is Tier 2 Major. Per the Tier-2-rides-state-Accela pattern Clackamas confirmed, Yamhill jurisdictions — McMinnville, Newberg, Dundee, Carlton, Lafayette, Dayton, Sheridan, Willamina, Yamhill (city), Amity, and unincorporated — default-route through aca-oregon.accela.com/oregon. IN FLIGHT — McMinnville and Newberg are the two largest jurisdictions and MAY run their own city portals (recon hit 403 / 404 — per-city deep links not yet captured); until those resolve, the state-Accela landing is the canonical surface for ALL Yamhill jurisdictions, with per-city routing flagged. Same deep-link-only pattern as every other Tier-2 state-Accela county. FORMATTING: TERRA aesthetic. 🚧 emoji header. Surface jurisdiction ('Yamhill County — Oregon state Accela; Tier 2 reuse pattern. McMinnville + Newberg city portals IN FLIGHT'). Frame the deep link as 'one tap from the live state portal.'",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
     "fetch_polk_assessment": {
         "name": "fetch_polk_assessment",
         "description": "TERRA: Fetch the Polk County assessment + ownership snapshot for a taxlot (Dallas / Independence / Monmouth / Falls City / Willamina / West Salem-adjacent / unincorporated Polk). Use when the user asks about a parcel in west Willamette Valley around Salem's west bank, the Polk side of the Salem metro, or the Coast-Range-east hill country. Polk's public taxlot service is MARION-RICH: source ships joined parcel + AcctTable attrs in ONE row — owner_line1, agent_name, in_care_of, full mailing block (addr1/2/city/state/zip/country), situs (street + city + zip), account_id + prim_acc_num, last instrument (id / type / year / month — source ships no day, no recorded sale price), property class + description, dwelling flag, assessed values (land / improvement / total — source ships NO RMV-family valuation, only assessed), tax routing (SA / MA / NH / TaxCode / TaxCodeArea / Unit_ID), acreage (polygon native + account-of-record + sqft). NO scraper, NO viewstate gating, NO HTTP per call — pure SQL pass-through over parcels_polk. IN FLIGHT — flag honestly, do not invent: real-market valuation (Polk MapServer exposes only assessed); building details (year built / sqft / bed / bath — not exposed); zoning (separate Polk MapServer not yet ingested); Polk's www.polkcountyor.gov direct portal subpages return 404 — only maps.co.polk.or.us/pcmaps + the PSO Property Search Online portal are reachable for human follow-up. FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (👤 OWNER / 🏠 SITUS / 🧾 ACCOUNT / 💰 VALUATION / 🌍 ACREAGE / 🔗 DEEP LINKS). Surface assessed_total prominently in 💰 VALUATION; explicitly note RMV is not in source. End with the pso_search + polk_maps deep links as broker hand-off.",
@@ -766,6 +805,9 @@ LOCAL_TOOL_FUNCTIONS = {
     "fetch_benton_assessment": fetch_benton_assessment,
     "fetch_benton_records": fetch_benton_records,
     "fetch_benton_permits": fetch_benton_permits,
+    "fetch_yamhill_assessment": fetch_yamhill_assessment,
+    "fetch_yamhill_records": fetch_yamhill_records,
+    "fetch_yamhill_permits": fetch_yamhill_permits,
     "fetch_polk_assessment": fetch_polk_assessment,
     "fetch_polk_records": fetch_polk_records,
     "fetch_polk_permits": fetch_polk_permits,

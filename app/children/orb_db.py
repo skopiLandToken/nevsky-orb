@@ -608,6 +608,53 @@ COUNTY_REGISTRY = {
             LIMIT 1
         """,
     },
+    "033": {  # Josephine (FIPS 41-033) — Tier 2 Major, Southern Oregon (Grants Pass / Cave Junction / Rogue Valley west)
+        "name": "Josephine",
+        # bbox: Josephine spans the Rogue Valley western half from the Cascade
+        # foothills east of Grants Pass through Cave Junction in the Illinois
+        # Valley south to the California border. Grants Pass + Cave Junction +
+        # Merlin + Selma + Williams + Wolf Creek + O'Brien + Wilderville +
+        # Kerby + Sunny Valley + Applegate + unincorporated. Confirmed against
+        # ingested polygon envelope (41.99,42.78,-124.04,-123.23) — padded slightly.
+        "bbox": (41.95, 42.85, -124.10, -123.15),
+        # Josephine ships the RICHEST inline assessor surface in TERRA: ownership,
+        # situs, valuation (RMV + assessed), acreage, INLINE ZONING (Zone field —
+        # no separate service needed unlike Jackson), AND the most-recent recorded
+        # sale (DEED_TYPE/INST_NO/SALE_DATE/SALE_PRICE) inline. So L1 covers the
+        # whole assessor portal surface; L2 = SQL pass-through, no scrape.
+        # Acres source priority: acreage (assessor of record) → legal_acre →
+        # gis_acres (polygon native).
+        "query": """
+            SELECT taxlot,
+                   COALESCE(map_num, mnx) AS section_id,
+                   ROUND(
+                       COALESCE(
+                           NULLIF(acreage, 0),
+                           NULLIF(legal_acre, 0),
+                           NULLIF(gis_acres, 0),
+                           ST_Area(geom::geography) / 4046.8564224
+                       )::numeric,
+                       3
+                   ) AS acres,
+                   'https://jcpa.josephinecounty.gov/Home' AS county_url,
+                   COALESCE(map_num, mnx) AS map_number,
+                   owner_name,
+                   CASE
+                       WHEN situs_address IS NULL OR situs_address = '' THEN NULL
+                       WHEN situs_address LIKE '*%%' THEN NULL
+                       ELSE TRIM(situs_address) ||
+                            COALESCE(', ' || NULLIF(situs_city, ''), '')
+                   END AS situs_address,
+                   zone AS zone_code,
+                   zone AS zone_label,
+                   ST_AsText(ST_Centroid(geom)) AS parcel_centroid,
+                   'Josephine'::text AS county_name,
+                   '033'::text AS county_fips
+            FROM parcels_josephine
+            WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            LIMIT 1
+        """,
+    },
     # Jefferson (031) lands here when its L1 table exists.
 }
 
@@ -1166,6 +1213,11 @@ _OREGON_EPERMITTING_FIPS = {
             #                service (gis.co.marion.or.us/.../PublicWorksPermits) whose
             #                description states permits are "as entered in Accela"; the
             #                aca-oregon.accela.com /oregon module exposes Marion permits.
+    "033",  # Josephine     — Tier 2 Major. Grants Pass runs its OWN EnerGov SelfService
+            #                portal (selfservice.grantspassoregon.gov/energov_prod/selfservice),
+            #                so fetch_josephine_permits routes Grants Pass away from state Accela.
+            #                Cave Junction + Merlin + Selma + Williams + Wolf Creek + O'Brien +
+            #                unincorporated Josephine ride state Accela — Tier 2 reuse pattern.
     # Deschutes (017) does NOT participate — uses DIAL natively. Multnomah (051)
     # has its own permit system (Portland Maps for COP parcels). Add new FIPS
     # codes here only after confirming via the BCD jurisdiction lookup.
@@ -4110,4 +4162,18 @@ from .polk_terra import (
     fetch_polk_assessment,
     fetch_polk_records,
     fetch_polk_permits,
+)
+
+
+# =============================================================================
+# JOSEPHINE County L2/L3 — re-exported from josephine_terra (separate module,
+# same precedent as linn_terra / polk_terra to avoid concurrent-edit thrash on
+# this file during Yindo parallel-session expansions). Functional contract
+# identical to every other county; callers keep using
+# `from .orb_db import fetch_josephine_*` regardless of where the body lives.
+# =============================================================================
+from .josephine_terra import (
+    fetch_josephine_assessment,
+    fetch_josephine_records,
+    fetch_josephine_permits,
 )
