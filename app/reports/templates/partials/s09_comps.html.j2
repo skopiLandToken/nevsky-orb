@@ -1,0 +1,30 @@
+{# Section 9 — Comparable Sales (nearest same-zone parcels from our own data). #}
+<section class="section">
+  <div class="section-head">
+    <span class="section-num">09</span>
+    <h2 class="section-title">Comparable Parcels</h2>
+    <span class="section-kicker">Proximity &amp; zoning</span>
+  </div>
+
+  {% if comps and comps|length %}
+  <table>
+    <thead>
+      <tr><th>Taxlot</th><th>Zoning</th><th class="num">Acres</th><th class="num">Distance</th><th class="num">Last sale</th></tr>
+    </thead>
+    <tbody>
+      {% for c in comps %}
+      <tr>
+        <td class="mono">{% if c.dial_url %}<a href="{{ c.dial_url }}">{{ c.taxlot }}</a>{% else %}{{ c.taxlot }}{% endif %}</td>
+        <td>{{ c.zone_code or "—" }}</td>
+        <td class="num">{{ c.acres if c.acres is not none else "—" }}</td>
+        <td class="num">{{ c.dist_m|int }} m</td>
+        <td class="num"><span class="badge-flight">In Flight</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if comps_note %}<p class="figsrc" style="margin-top:8px">{{ comps_note }}</p>{% endif %}
+  {% else %}
+  <div class="empty">No comparable parcels identified.</div>
+  {% endif %}
+</section>

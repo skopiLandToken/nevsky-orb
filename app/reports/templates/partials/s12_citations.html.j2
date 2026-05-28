@@ -1,0 +1,43 @@
+{# Section 12 — Sources & Citations (MANDATORY at every depth).
+   Lists every imagery provider and data source with pull date. This is the
+   transparency/credibility play, aligned with DOCTRINE-LAND-ANCHOR-01. #}
+<section class="section">
+  <div class="section-head">
+    <span class="section-num">12</span>
+    <h2 class="section-title">Sources &amp; Citations</h2>
+    <span class="section-kicker">Full transparency</span>
+  </div>
+
+  <p class="lead" style="margin-bottom:14px">
+    Every figure, image, and table in this report is sourced from public records or
+    licensed imagery. We cite each source and the date it was pulled so any claim here
+    can be independently verified.
+  </p>
+
+  {% for s in sources %}
+  <div class="cite">
+    <span class="c-label">{{ s.label }}</span>
+    {% if not s.ok %}<span class="badge-flight">Unavailable</span>{% endif %}
+    <div class="c-meta">
+      {{ s.provider }} · {{ s.license }} · pulled {{ s.pulled_at }}{% if s.url %} ·
+      <a href="{{ s.url }}">{{ s.url }}</a>{% endif %}
+    </div>
+  </div>
+  {% endfor %}
+
+  <p class="cite-note">
+    <strong>Imagery policy.</strong> This report uses Esri World Imagery, USGS
+    topographic and NAIP imagery, FEMA National Flood Hazard Layer data, and parcel
+    boundary geometry from TERRA's own PostGIS layer. It contains <strong>no Google
+    Maps, Street View, or satellite imagery</strong>. Citation does not grant a
+    license; we use only sources whose terms permit redistribution in a document
+    like this one. Where a source could not be licensed cleanly for a given layer,
+    that layer is marked <span class="badge-flight">In Flight</span> rather than shown.
+  </p>
+
+  <div class="doc-foot">
+    {{ branding.brand_primary }} · {{ branding.brand_secondary }} — {{ branding.tagline }}<br>
+    Report ID {{ taxid }}/{{ county_fips }} · generated {{ generated_at }} ·
+    This document is informational and is not a title report, survey, appraisal, or legal opinion.
+  </div>
+</section>

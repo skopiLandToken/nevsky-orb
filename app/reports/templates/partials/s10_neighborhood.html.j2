@@ -1,0 +1,34 @@
+{# Section 10 — Neighborhood / Market Context. #}
+<section class="section">
+  <div class="section-head">
+    <span class="section-num">10</span>
+    <h2 class="section-title">Neighborhood &amp; Market Context</h2>
+    <span class="section-kicker">Within {{ neighborhood.radius_m or 800 }} m</span>
+  </div>
+
+  {% if neighborhood and neighborhood.zone_mix %}
+  <p class="lead" style="margin-bottom:12px">
+    {{ neighborhood.total_parcels }} parcels lie within {{ neighborhood.radius_m }} meters of this
+    property. The surrounding zoning mix and typical parcel size give a read on the
+    immediate development character.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Zoning</th><th class="num">Parcels</th><th class="num">Share</th><th class="num">Avg. acres</th></tr>
+    </thead>
+    <tbody>
+      {% for z in neighborhood.zone_mix %}
+      <tr>
+        <td>{{ z.zone_code }}</td>
+        <td class="num">{{ z.n }}</td>
+        <td class="num">{{ ((z.n / neighborhood.total_parcels) * 100) | round(1) }}%</td>
+        <td class="num">{{ z.avg_acres if z.avg_acres is not none else "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="figsrc" style="margin-top:8px">Source: TERRA PostGIS parcel layer (Deschutes ingest).</p>
+  {% else %}
+  <div class="empty">Neighborhood context unavailable for this parcel.</div>
+  {% endif %}
+</section>

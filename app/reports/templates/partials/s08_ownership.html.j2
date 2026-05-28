@@ -1,0 +1,40 @@
+{# Section 8 — Ownership & Sales History (DIAL deed chain). #}
+<section class="section">
+  <div class="section-head">
+    <span class="section-num">08</span>
+    <h2 class="section-title">Ownership &amp; Sales History</h2>
+    <span class="section-kicker">Deed chain</span>
+  </div>
+
+  <div class="grid2" style="margin-bottom:14px">
+    <div class="kv"><div class="k">Current owner of record</div>
+      <div class="v">{% if identity.owner and identity.owner != IN_FLIGHT %}{{ identity.owner }}{% else %}<span class="badge-flight">In Flight</span>{% endif %}</div></div>
+    <div class="kv"><div class="k">Tax account</div><div class="v mono">{{ identity.account }}</div></div>
+  </div>
+
+  {% if sales and sales|length %}
+  <table>
+    <thead>
+      <tr><th>Sale date</th><th>Seller</th><th>Buyer</th><th class="num">Amount</th><th>Instrument</th></tr>
+    </thead>
+    <tbody>
+      {% for s in sales %}
+      <tr>
+        <td>{{ s.sale_date or "—" }}</td>
+        <td>{{ s.seller or "—" }}</td>
+        <td>{{ s.buyer or "—" }}</td>
+        <td class="num mono">{{ s.sale_amount or "—" }}</td>
+        <td class="mono">{% if s.deeplink %}<a href="{{ s.deeplink }}">{{ s.instrument or "link" }}</a>{% else %}{{ s.instrument or "—" }}{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="figsrc" style="margin-top:8px">
+    Source: Deschutes County Assessor (DIAL). $0 transfers typically indicate
+    entity reorganizations, family transfers, or corrective deeds rather than
+    arm's-length sales.
+  </p>
+  {% else %}
+  <div class="empty">No recorded sales history available for this parcel.</div>
+  {% endif %}
+</section>

@@ -1,0 +1,37 @@
+{# Section 4 — Valuation (DIAL assessed + real-market history). #}
+<section class="section">
+  <div class="section-head">
+    <span class="section-num">04</span>
+    <h2 class="section-title">Valuation</h2>
+    <span class="section-kicker">Assessor history</span>
+  </div>
+
+  {% if valuation and valuation.metrics %}
+  <table>
+    <thead>
+      <tr>
+        <th>Metric</th>
+        {% for y in valuation.years %}<th class="num">{{ y }}</th>{% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for m in valuation.metrics %}
+      <tr>
+        <td>{{ m.label }}</td>
+        {% for v in m['values'] %}<td class="num mono">{{ v or "—" }}</td>{% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="figsrc" style="margin-top:8px">
+    Source: Deschutes County Assessor (DIAL). Real Market Value (RMV) reflects the
+    assessor's estimate of market value; Assessed Value is the taxable basis after
+    Oregon Measure 50 limits.
+  </p>
+  {% else %}
+  <div class="empty">
+    <span class="badge-flight">In Flight</span><br>
+    County valuation history is not wired for this parcel.
+  </div>
+  {% endif %}
+</section>

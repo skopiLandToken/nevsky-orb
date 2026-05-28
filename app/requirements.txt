@@ -11,3 +11,6 @@ anthropic==0.63.0
 python-multipart>=0.0.9
 beautifulsoup4>=4.12.0
 pypdf>=4.0.0
+jinja2>=3.1.2
+weasyprint>=63
+Pillow>=10.0

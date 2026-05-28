@@ -1,0 +1,40 @@
+{# Section 11 — Development Potential (TERRA Yield Calc). #}
+<section class="section">
+  <div class="section-head">
+    <span class="section-num">11</span>
+    <h2 class="section-title">Development Potential</h2>
+    <span class="section-kicker">TERRA Yield Calc</span>
+  </div>
+
+  {% if yield_est and not yield_est.error and yield_est.is_residential and yield_est.lot_yield is defined %}
+  <div class="callout">
+    <span class="lbl">Estimated speculative residential yield</span>
+    <div class="big">{{ yield_est.lot_yield }} lots</div>
+  </div>
+  <div class="grid3" style="margin-top:8px">
+    <div class="kv"><div class="k">Gross acres</div><div class="v">{{ yield_est.gross_acres }}</div></div>
+    <div class="kv"><div class="k">Usable acres (after {{ (yield_est.assumptions_used.deduction_pct * 100)|int }}% deduction)</div><div class="v">{{ yield_est.usable_acres }}</div></div>
+    <div class="kv"><div class="k">Min lot size</div><div class="v">{{ yield_est.min_lot_sqft }} sq ft</div></div>
+    <div class="kv"><div class="k">Zone</div><div class="v">{{ yield_est.zone_label or yield_est.zone_code }}</div></div>
+    <div class="kv"><div class="k">Jurisdiction</div><div class="v">{{ yield_est.zone_jurisdiction }}</div></div>
+    <div class="kv"><div class="k">Ordinance verified</div><div class="v">{{ "Yes" if yield_est.verified else "Unverified" }}</div></div>
+  </div>
+  {% if yield_est.gross_retail %}
+  <p class="lead" style="margin-top:12px">At a broker-supplied {{ yield_est.per_lot_value }} per finished lot, gross retail potential is
+    approximately <strong>{{ "${:,.0f}".format(yield_est.gross_retail) }}</strong>.</p>
+  {% else %}
+  <p class="figsrc" style="margin-top:12px">Gross retail value requires a broker-supplied per-lot market value —
+    TERRA does not assume your market. <span class="badge-flight">In Flight</span></p>
+  {% endif %}
+  <p class="figsrc" style="margin-top:8px">
+    Speculative estimate under current zoning; a {{ (yield_est.assumptions_used.deduction_pct * 100)|int }}%
+    deduction is applied for roads, setbacks, and infrastructure. Not a survey or
+    entitlement guarantee. Source: TERRA Yield Calc{% if yield_est.source_url %} ·
+    <a href="{{ yield_est.source_url }}">zoning ordinance</a>{% endif %}.
+  </p>
+  {% elif yield_est and yield_est.is_residential == false %}
+  <div class="empty">{{ yield_est.message or "Non-residential zone — lot-yield model not applicable." }}</div>
+  {% else %}
+  <div class="empty"><span class="badge-flight">In Flight</span><br>{{ yield_est.error or "Yield estimate unavailable for this parcel." }}</div>
+  {% endif %}
+</section>

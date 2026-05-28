@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>TERRA Property Report — {{ identity.legal if identity and identity.legal and identity.legal != IN_FLIGHT else taxid }}</title>
+  {% include "partials/styles.html.j2" %}
+  <style>
+    @page { @bottom-left { content: "Generated {{ generated_at }}"; font-size: 8px; color: #9aa6b0; } }
+  </style>
+</head>
+<body>
+<div class="page-wrap">
+
+  {% if unsupported %}
+    {# County not wired for v1 — honest scaffold, no fabrication. #}
+    <section class="section" style="page-break-before:auto">
+      <div class="section-head">
+        <span class="section-num">—</span>
+        <h2 class="section-title">{{ county }} County Report</h2>
+      </div>
+      <p class="lead">{{ notice }}</p>
+      <p class="lead"><span class="badge-flight">In Flight</span> Deschutes County (017) is the
+      wired prototype. This county's data assembly is pending.</p>
+    </section>
+  {% else %}
+
+    {# ---- 1. COVER (always) ---- #}
+    {% include "partials/s01_cover.html.j2" %}
+
+    {# ---- 2. EXECUTIVE SUMMARY ---- #}
+    {% if section_visible(depth, 2) %}{% include "partials/s02_summary.html.j2" %}{% endif %}
+
+    {# ---- 3. IDENTITY & LEGAL ---- #}
+    {% if section_visible(depth, 3) %}{% include "partials/s03_identity.html.j2" %}{% endif %}
+
+    {# ---- 4. VALUATION ---- #}
+    {% if section_visible(depth, 4) %}{% include "partials/s04_valuation.html.j2" %}{% endif %}
+
+    {# ---- 5. MAPS ---- #}
+    {% if section_visible(depth, 5) %}{% include "partials/s05_maps.html.j2" %}{% endif %}
+
+    {# ---- 6. PHOTO GALLERY ---- #}
+    {% if section_visible(depth, 6) %}{% include "partials/s06_photos.html.j2" %}{% endif %}
+
+    {# ---- 7. PERMITS & DEVELOPMENT ---- #}
+    {% if section_visible(depth, 7) %}{% include "partials/s07_permits.html.j2" %}{% endif %}
+
+    {# ---- 8. OWNERSHIP & SALES ---- #}
+    {% if section_visible(depth, 8) %}{% include "partials/s08_ownership.html.j2" %}{% endif %}
+
+    {# ---- 9. COMPARABLE SALES ---- #}
+    {% if section_visible(depth, 9) %}{% include "partials/s09_comps.html.j2" %}{% endif %}
+
+    {# ---- 10. NEIGHBORHOOD / MARKET ---- #}
+    {% if section_visible(depth, 10) %}{% include "partials/s10_neighborhood.html.j2" %}{% endif %}
+
+    {# ---- 11. DEVELOPMENT POTENTIAL ---- #}
+    {% if section_visible(depth, 11) %}{% include "partials/s11_potential.html.j2" %}{% endif %}
+
+    {# ---- 12. SOURCES & CITATIONS (mandatory, always) ---- #}
+    {% include "partials/s12_citations.html.j2" %}
+
+  {% endif %}
+
+</div>
+</body>
+</html>

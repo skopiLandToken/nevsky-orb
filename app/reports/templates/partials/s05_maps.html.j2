@@ -1,0 +1,24 @@
+{# Section 5 — Maps. Licensed imagery only (Esri / USGS / FEMA). Boundary overlay
+   from our own PostGIS geometry. No Google imagery anywhere. #}
+<section class="section">
+  <div class="section-head">
+    <span class="section-num">05</span>
+    <h2 class="section-title">Maps</h2>
+    <span class="section-kicker">Licensed imagery</span>
+  </div>
+
+  {% for m in maps %}
+  <div class="figure">
+    {% if m.image %}
+    <div class="map-frame">
+      <img src="{{ m.image }}" alt="{{ m.title }}">
+      {% if m.overlay_svg %}{{ m.overlay_svg | safe }}{% endif %}
+    </div>
+    {% else %}
+    <div class="empty"><span class="badge-flight">In Flight</span><br>{{ m.title }} — imagery unavailable for this layer.</div>
+    {% endif %}
+    <div class="figcap"><strong>{{ m.title }}.</strong> {{ m.caption }}</div>
+    {% if m.provider %}<div class="figsrc">Imagery: {{ m.provider }}. Boundary: TERRA PostGIS.</div>{% endif %}
+  </div>
+  {% endfor %}
+</section>

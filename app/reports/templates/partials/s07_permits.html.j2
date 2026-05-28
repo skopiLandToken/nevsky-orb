@@ -1,0 +1,47 @@
+{# Section 7 — Permits & Development History (DIAL L3). #}
+<section class="section">
+  <div class="section-head">
+    <span class="section-num">07</span>
+    <h2 class="section-title">Permits &amp; Development History</h2>
+    <span class="section-kicker">County records</span>
+  </div>
+
+  {% if permits.found %}
+    {% if permits.count and permits.count > 0 %}
+    <table>
+      <thead>
+        <tr><th>Permit</th><th>Type</th><th>Description</th><th>Applied</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        {% for p in permits['items'] %}
+        <tr>
+          <td class="mono">{% if p.deeplink %}<a href="{{ p.deeplink }}">{{ p.permit_id }}</a>{% else %}{{ p.permit_id }}{% endif %}</td>
+          <td>{{ p.permit_type or "—" }}</td>
+          <td>{{ p.permit_name or "—" }}</td>
+          <td>{{ p.application_date or "—" }}</td>
+          <td>{{ p.status or "—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="empty">No building or development permits on record for this parcel — consistent with undeveloped land.</div>
+    {% endif %}
+    {% if permits.url %}<p class="figsrc" style="margin-top:8px">Source: Deschutes County DIAL — <a href="{{ permits.url }}">{{ permits.url }}</a></p>{% endif %}
+  {% else %}
+  <div class="empty"><span class="badge-flight">In Flight</span><br>Permit history not retrievable for this parcel.</div>
+  {% endif %}
+
+  <h4 style="margin-top:18px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)">Development documents on file</h4>
+  {% if dev_docs.found and dev_docs.count and dev_docs.count > 0 %}
+  <table style="margin-top:6px">
+    <tbody>
+      {% for r in dev_docs.rows %}
+      <tr>{% for k, v in r.items() %}{% if k != "_links" %}<td>{{ v }}</td>{% endif %}{% endfor %}</tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p style="font-size:12px;color:var(--ink-soft);margin-top:6px">No recorded easements, planning files, or development encumbrances found on file.</p>
+  {% endif %}
+</section>

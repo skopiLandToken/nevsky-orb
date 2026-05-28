@@ -1,0 +1,177 @@
+<style>
+  /* ===================================================================
+     TERRA Property Report — single stylesheet, both outputs.
+     Screen rules + @media print + @page rules live together so the HTML
+     and the WeasyPrint PDF render from the exact same design.
+     =================================================================== */
+
+  :root {
+    --ink:        #0e1a26;   /* near-black slate */
+    --ink-soft:   #2b3a47;
+    --muted:      #5c6b78;
+    --line:       #d7dee4;
+    --paper:      #ffffff;
+    --paper-alt:  #f4f6f8;
+    --gold:       #b8862f;   /* TERRA accent — warm land gold */
+    --gold-soft:  #e9d9b6;
+    --forest:     #15412f;   /* deep land green */
+    --flag:       #b03a2e;   /* IN FLIGHT / attention */
+  }
+
+  * { box-sizing: border-box; }
+
+  html { font-size: 11px; }
+
+  body {
+    margin: 0;
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    line-height: 1.5;
+    background: var(--paper);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1, h2, h3, h4 { margin: 0; font-weight: 700; letter-spacing: -0.01em; }
+
+  a { color: var(--forest); text-decoration: none; }
+
+  .mono { font-family: "SFMono-Regular", Menlo, Consolas, monospace; }
+
+  /* ---------- page geometry ---------- */
+  @page {
+    size: Letter;
+    margin: 0.85in 0.7in 0.8in 0.7in;
+    @top-left   { content: "SKOpi · TERRA"; font-family: Helvetica, Arial, sans-serif;
+                  font-size: 8px; letter-spacing: 0.18em; color: #8a97a2; }
+    @top-right  { content: "TERRA PROPERTY REPORT"; font-family: Helvetica, Arial, sans-serif;
+                  font-size: 8px; letter-spacing: 0.12em; color: #8a97a2; }
+    @bottom-center{ content: "Confidential property report — sources cited within";
+                    font-size: 7.5px; color: #aab4bd; }
+    @bottom-right { content: counter(page) " / " counter(pages); font-size: 8px; color: #9aa6b0; }
+  }
+  /* Cover is page 1 — kill margins AND the running header/footer boxes there. */
+  @page :first {
+    margin: 0;
+    @top-left { content: ""; } @top-right { content: ""; }
+    @bottom-left { content: ""; } @bottom-center { content: ""; } @bottom-right { content: ""; }
+  }
+
+  /* ---------- cover ---------- */
+  .cover {
+    position: relative;
+    width: 8.5in; height: 11in;
+    color: #fff;
+    overflow: hidden;
+    page-break-after: always;
+  }
+  .cover-bg {
+    position: absolute; top: 0; left: 0;
+    width: 8.5in; height: 11in;
+    object-fit: cover;
+    background-color: #0e1a26;
+  }
+  .cover-overlay {
+    position: absolute; top: 0; left: 0;
+    width: 8.5in; height: 11in;
+    background: linear-gradient(180deg, rgba(10,18,26,.80) 0%, rgba(10,18,26,.18) 36%,
+                rgba(10,18,26,.22) 60%, rgba(10,18,26,.93) 100%);
+  }
+  .cover-inner { position: absolute; top: 0; left: 0;
+                 width: 8.5in; height: 11in; padding: 0.75in; display: flex;
+                 flex-direction: column; justify-content: space-between; }
+  .cover-brand { display: flex; align-items: baseline; gap: 0.5em;
+                 font-size: 17px; letter-spacing: 0.32em; font-weight: 700; }
+  .cover-brand .terra { color: var(--gold-soft); }
+  .cover-kicker { margin-top: 4px; font-size: 9px; letter-spacing: 0.34em;
+                  text-transform: uppercase; color: #cfd8de; opacity: .9; }
+  .cover-title { font-size: 40px; line-height: 1.05; max-width: 6.5in; text-shadow: 0 2px 18px rgba(0,0,0,.5); }
+  .cover-sub { margin-top: 10px; font-size: 14px; color: #e6ebef; font-weight: 400; }
+  .cover-meta { display: flex; gap: 28px; margin-top: 18px; font-size: 11px; }
+  .cover-meta .k { display: block; font-size: 8px; letter-spacing: 0.2em; text-transform: uppercase;
+                   color: var(--gold-soft); margin-bottom: 2px; }
+  .cover-foot { display: flex; justify-content: space-between; align-items: flex-end; }
+  .mp-credit { font-size: 10px; line-height: 1.45; }
+  .mp-credit .mp-name { font-size: 13px; font-weight: 700; }
+  .mp-credit .mp-label { font-size: 7.5px; letter-spacing: 0.22em; text-transform: uppercase;
+                         color: var(--gold-soft); }
+  .cover-gen { text-align: right; font-size: 9px; color: #cdd6dd; }
+
+  /* ---------- section scaffolding ---------- */
+  .section { page-break-before: always; padding-top: 2px; }
+  .section-head { border-bottom: 2px solid var(--ink); padding-bottom: 6px; margin-bottom: 14px;
+                  display: flex; align-items: baseline; gap: 12px; }
+  .section-num { font-size: 11px; font-weight: 700; color: var(--gold);
+                 letter-spacing: 0.1em; }
+  .section-title { font-size: 19px; }
+  .section-kicker { margin-left: auto; font-size: 8px; letter-spacing: 0.22em;
+                    text-transform: uppercase; color: var(--muted); }
+  .lead { font-size: 13px; color: var(--ink-soft); max-width: 6.4in; }
+
+  /* ---------- generic blocks ---------- */
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 22px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px 18px; }
+  .kv { padding: 7px 0; border-bottom: 1px solid var(--line); }
+  .kv .k { font-size: 8px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); }
+  .kv .v { font-size: 13px; font-weight: 600; color: var(--ink); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  thead th { text-align: left; font-size: 8px; letter-spacing: 0.14em; text-transform: uppercase;
+             color: var(--muted); border-bottom: 1.5px solid var(--ink); padding: 7px 8px; }
+  tbody td { padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tbody tr:nth-child(even) td { background: var(--paper-alt); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  .callout { background: var(--paper-alt); border-left: 3px solid var(--gold);
+             padding: 12px 14px; margin: 12px 0; border-radius: 0 4px 4px 0; }
+  .callout .big { font-size: 30px; font-weight: 700; color: var(--forest); line-height: 1; }
+  .callout .lbl { font-size: 8px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--muted); }
+
+  .stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 6px 0 14px; }
+  .stat { background: var(--ink); color: #fff; border-radius: 6px; padding: 12px 14px; }
+  .stat .n { font-size: 24px; font-weight: 700; line-height: 1; }
+  .stat .l { font-size: 7.5px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--gold-soft);
+             margin-top: 6px; }
+
+  .flag { color: var(--flag); font-weight: 700; font-size: 10px; letter-spacing: 0.04em; }
+  .badge-flight { display: inline-block; background: #fbeae8; color: var(--flag);
+                  border: 1px solid #e7b9b3; font-size: 8px; font-weight: 700; letter-spacing: 0.1em;
+                  padding: 1px 6px; border-radius: 3px; text-transform: uppercase; }
+
+  /* ---------- maps / figures ---------- */
+  .figure { margin: 0 0 16px; page-break-inside: avoid; }
+  .map-frame { position: relative; width: 100%; border: 1px solid var(--line); border-radius: 5px;
+               overflow: hidden; line-height: 0; }
+  .map-frame img { width: 100%; display: block; }
+  .parcel-overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .parcel-overlay polygon { fill: rgba(184,134,47,0.16); stroke: #ffd24a; stroke-width: 3;
+                            stroke-linejoin: round; }
+  .figcap { font-size: 9.5px; color: var(--ink-soft); margin-top: 6px; }
+  .figsrc { font-size: 8px; color: var(--muted); margin-top: 2px; }
+  .map-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+
+  .photo-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .photo-grid img { width: 100%; border-radius: 4px; border: 1px solid var(--line); }
+  .empty { background: var(--paper-alt); border: 1px dashed var(--line); border-radius: 5px;
+           padding: 20px; text-align: center; color: var(--muted); font-size: 11px; }
+
+  /* ---------- citations ---------- */
+  .cite { font-size: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .cite .c-label { font-weight: 700; }
+  .cite .c-meta { color: var(--muted); }
+  .cite-note { font-size: 9.5px; color: var(--ink-soft); margin-top: 14px; line-height: 1.55; }
+
+  .doc-foot { margin-top: 22px; padding-top: 10px; border-top: 1px solid var(--line);
+              font-size: 8.5px; color: var(--muted); }
+
+  /* string-set drivers for running headers */
+  .doc-title-src { string-set: doc-title content(); }
+  .gen-date-src  { string-set: gen-date content(); }
+
+  @media screen {
+    body { background: #e9edf0; }
+    .page-wrap { max-width: 8.5in; margin: 0 auto; background: #fff;
+                 box-shadow: 0 2px 24px rgba(0,0,0,.12); }
+    .section { padding: 0.7in; page-break-before: auto; border-top: 1px solid var(--line); }
+    .cover { margin: 0 auto; }
+  }
+</style>

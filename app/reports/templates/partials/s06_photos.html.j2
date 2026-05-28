@@ -1,0 +1,25 @@
+{# Section 6 — Photo Gallery. Assessor photos + licensed aerials + SVOIcloud uploads.
+   Graceful when zero photos. #}
+<section class="section">
+  <div class="section-head">
+    <span class="section-num">06</span>
+    <h2 class="section-title">Photo Gallery</h2>
+    <span class="section-kicker">Imagery</span>
+  </div>
+
+  {% if photos['items'] and photos['items']|length %}
+  <div class="photo-grid">
+    {% for p in photos['items'] %}
+    <figure style="margin:0">
+      <img src="{{ p.src }}" alt="{{ p.caption or 'Property photo' }}">
+      {% if p.caption %}<figcaption class="figsrc">{{ p.caption }}</figcaption>{% endif %}
+    </figure>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty">
+    No photographs on record for this parcel.<br>
+    <span class="figsrc">{{ photos.note }}</span>
+  </div>
+  {% endif %}
+</section>

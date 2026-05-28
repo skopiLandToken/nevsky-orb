@@ -5373,3 +5373,45 @@ async def ccd_skip_draft(draft_id: str):
 # END CROSS-CHILD-DRAFT (CCD) endpoints
 # ═════════════════════════════════════════════════════════════════════
 
+# ═════════════════════════════════════════════════════════════════════
+# TERRA WHITE-LABEL REPORT ENGINE — GET /terra/report
+# One Jinja2 template set → HTML or PDF (WeasyPrint). Imagery is licensed-only
+# (Esri / USGS / FEMA / our PostGIS); no Google imagery. See app/reports/.
+# Imports are lazy so this block is self-contained and append-only on main.py.
+# ═════════════════════════════════════════════════════════════════════
+@app.get("/terra/report", include_in_schema=True)
+def terra_report(taxid: str, county: str = "017", depth: str = "full", format: str = "pdf"):
+    """Generate a deep TERRA property report for a single parcel.
+
+    taxid  — county tax/account id (Deschutes: DIAL property_id, e.g. 287611)
+    county — county FIPS (default 017 Deschutes; only 017 fully wired in v1)
+    depth  — 'full' (~all sections) or 'summary' (cover, summary, valuation,
+             permits, ownership, citations)
+    format — 'pdf' or 'html'
+    """
+    from fastapi.responses import Response, HTMLResponse
+    fmt = (format or "pdf").lower()
+    dep = (depth or "full").lower()
+    if fmt not in ("pdf", "html"):
+        raise HTTPException(status_code=400, detail="format must be 'pdf' or 'html'")
+    if dep not in ("summary", "full"):
+        raise HTTPException(status_code=400, detail="depth must be 'summary' or 'full'")
+    try:
+        from reports.report_data_builder import build_report_context
+        from reports.render import render_html, render_pdf
+        ctx = build_report_context(taxid, county, depth=dep)
+        slug = f"terra_{county}_{taxid}_{dep}"
+        if fmt == "html":
+            return HTMLResponse(render_html(ctx))
+        pdf = render_pdf(ctx)
+        return Response(
+            content=pdf,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="{slug}.pdf"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"report generation failed: {e}")

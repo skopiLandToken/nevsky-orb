@@ -1,0 +1,62 @@
+{# Section 2 — Executive Summary. Plain-language "what is this property". #}
+<section class="section">
+  <div class="section-head">
+    <span class="section-num">02</span>
+    <h2 class="section-title">Executive Summary</h2>
+    <span class="section-kicker">At a glance</span>
+  </div>
+
+  <div class="stat-row">
+    <div class="stat">
+      <div class="n">{{ identity.acres if identity.acres is not none else "—" }}</div>
+      <div class="l">Acres</div>
+    </div>
+    <div class="stat">
+      <div class="n">{{ identity.zone_code or "—" }}</div>
+      <div class="l">Zoning</div>
+    </div>
+    <div class="stat">
+      <div class="n">{% if headline.total_rmv %}{{ headline.total_rmv }}{% else %}—{% endif %}</div>
+      <div class="l">Total RMV{% if headline.year %} · {{ headline.year }}{% endif %}</div>
+    </div>
+    <div class="stat">
+      <div class="n">{% if yield_est and yield_est.lot_yield is defined and not yield_est.error %}{{ yield_est.lot_yield }}{% else %}—{% endif %}</div>
+      <div class="l">Est. Lot Yield</div>
+    </div>
+  </div>
+
+  <p class="lead">
+    This {{ identity.acres if identity.acres is not none else "" }}-acre parcel
+    {% if identity.legal and identity.legal != IN_FLIGHT %}({{ identity.legal }}){% endif %}
+    sits in {{ (identity.zone_jurisdiction | title) if identity.zone_jurisdiction else county }},
+    {{ county }} County, Oregon.
+    {% if identity.zone_code %}It is zoned <strong>{{ identity.zone_code }}</strong>{% if identity.zone_community_class %}
+    ({{ identity.zone_community_class | title }}){% endif %}.{% endif %}
+    {% if identity.situs and "No situs" not in identity.situs %}Situs address: {{ identity.situs }}.{% else %}
+    The parcel currently carries no situs address on file, consistent with undeveloped land.{% endif %}{{ " " }}
+    {% if headline.total_rmv %}Its most recent total real market value ({{ headline.year }}) is
+    <strong>{{ headline.total_rmv }}</strong>{% if headline.land_rmv %}, of which land accounts for
+    {{ headline.land_rmv }}{% endif %}.{% endif %}
+    {% if yield_est and not yield_est.error and yield_est.lot_yield is defined %}
+    Under current zoning, TERRA estimates a speculative residential yield of about
+    <strong>{{ yield_est.lot_yield }} lots</strong> (see Development Potential).{% endif %}
+  </p>
+
+  <h4 style="margin-top:16px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)">Standout flags</h4>
+  <ul style="margin:8px 0 0;padding-left:18px;font-size:12px;line-height:1.7">
+    {% if identity.zone_community_class and "URBAN GROWTH" in identity.zone_community_class|upper %}
+    <li><strong>Inside Urban Growth Boundary</strong> — positioned for urban-level development and services.</li>
+    {% endif %}
+    {% if dev_docs.count and dev_docs.count > 0 %}
+    <li><strong>{{ dev_docs.count }} development document(s) on file</strong> — review easements / planning encumbrances (Section 7).</li>
+    {% else %}
+    <li>No recorded easements or development encumbrances found on file.</li>
+    {% endif %}
+    {% if permits.found and permits.count == 0 %}
+    <li>No building permits on record — undeveloped / pre-development status.</li>
+    {% endif %}
+    {% if comps and comps|length %}
+    <li>{{ comps|length }} comparable parcels identified in the immediate vicinity (Section 9).</li>
+    {% endif %}
+  </ul>
+</section>

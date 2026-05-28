@@ -1,0 +1,52 @@
+{# Section 1 — Cover. Full-bleed hero (licensed Esri aerial), brand + MP credit. #}
+{% set hero = maps[0].image if maps and maps[0] and maps[0].image else None %}
+{% set title = identity.legal if identity.legal and identity.legal != IN_FLIGHT else "Property Report" %}
+{% set locality = (identity.zone_jurisdiction | title) if identity.zone_jurisdiction else "Deschutes County" %}
+<div class="cover">
+  {% if hero %}
+  <img class="cover-bg" src="{{ hero }}" alt="">
+  {% else %}
+  <div class="cover-bg"></div>
+  {% endif %}
+  <div class="cover-overlay"></div>
+  <div class="cover-inner">
+
+    <div class="cover-top">
+      <div class="cover-brand"><span>{{ branding.brand_primary }}</span><span class="terra">{{ branding.brand_secondary }}</span></div>
+      <div class="cover-kicker">Property Intelligence Report</div>
+    </div>
+
+    <div class="cover-mid">
+      <h1 class="cover-title">{{ title }}</h1>
+      <div class="cover-sub">{{ locality }}, Oregon · {{ county }} County</div>
+      <div class="cover-meta">
+        <div><span class="k">Tax ID</span><span class="mono">{{ identity.account }}</span></div>
+        <div><span class="k">Map-Taxlot</span><span class="mono">{{ identity.taxlot }}</span></div>
+        {% if identity.acres is not none %}<div><span class="k">Size</span>{{ identity.acres }} acres</div>{% endif %}
+        {% if identity.zone_code %}<div><span class="k">Zoning</span>{{ identity.zone_code }}</div>{% endif %}
+      </div>
+    </div>
+
+    <div class="cover-foot">
+      <div class="mp-credit">
+        {% if marketing_partner.name %}
+          <div class="mp-label">Prepared by your Marketing Partner</div>
+          <div class="mp-name">{{ marketing_partner.name }}</div>
+          {% if marketing_partner.brokerage %}<div>{{ marketing_partner.brokerage }}</div>{% endif %}
+          {% if marketing_partner.phone or marketing_partner.email %}
+          <div>{{ marketing_partner.phone or "" }}{% if marketing_partner.phone and marketing_partner.email %} · {% endif %}{{ marketing_partner.email or "" }}</div>
+          {% endif %}
+        {% else %}
+          <div class="mp-label">Prepared by</div>
+          <div class="mp-name">{{ branding.brand_primary }} {{ branding.brand_secondary }}</div>
+          <div>{{ branding.tagline }}</div>
+        {% endif %}
+      </div>
+      <div class="cover-gen">
+        Generated {{ generated_at }}<br>
+        {{ "Full report" if depth == "full" else "Summary report" }}
+      </div>
+    </div>
+
+  </div>
+</div>

@@ -1,0 +1,32 @@
+{# Section 3 — Identity & Legal. #}
+{% macro field(label, value) %}
+  <div class="kv">
+    <div class="k">{{ label }}</div>
+    <div class="v">{% if value and value != IN_FLIGHT %}{{ value }}{% else %}<span class="badge-flight">In Flight</span>{% endif %}</div>
+  </div>
+{% endmacro %}
+<section class="section">
+  <div class="section-head">
+    <span class="section-num">03</span>
+    <h2 class="section-title">Identity &amp; Legal</h2>
+    <span class="section-kicker">Of record</span>
+  </div>
+
+  <div class="grid2">
+    {{ field("Owner of record", identity.owner) }}
+    {{ field("Account / Tax ID", identity.account) }}
+    {{ field("Map &amp; Taxlot", identity.taxlot) }}
+    {{ field("Map number", identity.map_number) }}
+    {{ field("Situs address", identity.situs) }}
+    {{ field("Tax code area", identity.tax_code_area) }}
+    {{ field("Legal description", identity.legal) }}
+    {{ field("PLSS (Twp / Rng / Sec)", identity.plss) }}
+    {{ field("Zoning", (identity.zone_code ~ " — " ~ identity.zone_jurisdiction) if identity.zone_code else None) }}
+    {{ field("Community class", identity.zone_community_class) }}
+  </div>
+
+  {% if identity.dial_url %}
+  <p class="figsrc" style="margin-top:14px">County system of record:
+    <a href="{{ identity.dial_url }}">{{ identity.dial_url }}</a></p>
+  {% endif %}
+</section>
