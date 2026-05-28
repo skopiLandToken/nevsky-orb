@@ -565,6 +565,49 @@ COUNTY_REGISTRY = {
             FROM hit h
         """,
     },
+    "053": {  # Polk (FIPS 41-053) — Tier 2 Major, Dallas / Independence / Monmouth / West Salem
+        "name": "Polk",
+        # bbox: Polk spans the west Willamette Valley from the Coast Range east
+        # to the Willamette River (Salem's west bank). Dallas (county seat),
+        # Independence, Monmouth, Falls City, Willamina (split with Yamhill),
+        # plus all unincorporated rural land. Padded slightly.
+        "bbox": (44.65, 45.10, -123.80, -123.00),
+        # Polk's Assessor Taxlots service ships joined parcel+account attributes
+        # in one row (Marion-style) — owner, mailing block, situs, last instrument,
+        # property class, assessed values, account ID. So L1 covers most of what
+        # the assessor portal would return; L2 = SQL pass-through, no scrape.
+        # Acres source priority: taxlot_acres (polygon native, the assessor of
+        # record value when set) → acct_acres (account-of-record) → geodesic
+        # ST_Area (calc'd from polygon for edge cases where both are zero,
+        # which happens on small city lots flagged with TaxlotFeet only).
+        "query": """
+            SELECT taxlot,
+                   map_number AS section_id,
+                   ROUND(
+                       COALESCE(
+                           NULLIF(taxlot_acres, 0),
+                           NULLIF(acct_acres, 0),
+                           ST_Area(geom::geography) / 4046.8564224
+                       )::numeric,
+                       3
+                   ) AS acres,
+                   'https://www.polkcountyor.gov/assessor' AS county_url,
+                   map_number,
+                   COALESCE(NULLIF(owner_line1, ''), NULLIF(agent_name, '')) AS owner_name,
+                   CASE
+                       WHEN site_add_nam IS NULL OR site_add_nam = '' THEN NULL
+                       ELSE site_add_nam || COALESCE(', ' || NULLIF(site_add_cty, ''), '')
+                   END AS situs_address,
+                   NULL::text AS zone_code,
+                   NULL::text AS zone_label,
+                   ST_AsText(ST_Centroid(geom)) AS parcel_centroid,
+                   'Polk'::text AS county_name,
+                   '053'::text AS county_fips
+            FROM parcels_polk
+            WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            LIMIT 1
+        """,
+    },
     # Jefferson (031) lands here when its L1 table exists.
 }
 
