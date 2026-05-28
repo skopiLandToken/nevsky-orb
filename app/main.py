@@ -16,6 +16,8 @@ import redis as _yindo_redis_module
 from anthropic import Anthropic
 from biography import handle_biography_message, handle_biography_callback, router as biography_router
 from yakov import router as yakov_router
+from email_webhook import router as email_webhook_router
+from email_client import send_email_via_resend
 from blocklist_guard import check_blocklist_and_archive
 # === E2 Step 2b: per-file child imports retired 2026-04-28 ===
 # Children now load from child_personas DB rows via child_engine.ask_child().
@@ -48,6 +50,7 @@ def is_fred(telegram_id: str) -> bool:
 app = FastAPI(title="Nevsky API", version="0.1.0")
 app.include_router(biography_router)
 app.include_router(yakov_router)
+app.include_router(email_webhook_router)
 
 # ── Static file hosting for /share/* (public-readable HTML pages) ───
 from fastapi.staticfiles import StaticFiles
@@ -1073,9 +1076,13 @@ def send_email_via_smtp(
     from_address: str | None = None,
     draft_id: str | None = None,
 ) -> dict:
-    resend_api_key = os.getenv('RESEND_API_KEY', '')
-    if not resend_api_key:
-        return {'ok': False, 'error': 'RESEND_API_KEY not configured'}
+    """DEPRECATED shim (DOCTRINE-OUTBOUND-EMAIL-01). Kept for backward compat:
+    every existing caller keeps its signature and behavior, but the send now
+    routes through send_email_via_resend() on the internal "nevsky" key. The name
+    is a misnomer — nothing here has used SMTP for a while — and the whole shim is
+    queued for removal as TASK-RESEND-CLEANUP-01 once Resend has run clean 7 days.
+    """
+    print("DEPRECATION: send_email_via_smtp -> use send_email_via_resend (DOCTRINE-OUTBOUND-EMAIL-01)")
     from_addr = from_address or os.getenv('SMTP_FROM', 'iosif@skopi.io')
     base_url = os.getenv('ORB_BASE_URL', 'https://nevsky.skopi.io')
     if draft_id:
@@ -1083,29 +1090,24 @@ def send_email_via_smtp(
         html_body = f'<html><body><pre>{body}</pre><img src="{pixel_url}" width="1" height="1" style="display:none" /></body></html>'
     else:
         html_body = f'<html><body><pre>{body}</pre></body></html>'
-    payload = {
-        'from': from_addr,
-        'to': [to_address],
-        'subject': subject,
-        'text': body,
-        'html': html_body,
-    }
-    try:
-        resp = httpx.post(
-            'https://api.resend.com/emails',
-            headers={
-                'Authorization': f'Bearer {resend_api_key}',
-                'Content-Type': 'application/json',
-            },
-            json=payload,
-            timeout=15,
-        )
-        if resp.status_code in (200, 201):
-            return {'ok': True, 'to': to_address, 'subject': subject, 'resend_id': resp.json().get('id')}
-        else:
-            return {'ok': False, 'error': f'Resend API error {resp.status_code}: {resp.text}'}
-    except Exception as e:
-        return {'ok': False, 'error': str(e)}
+    # Tag the send so the Resend webhook can correlate events back to our draft +
+    # category. Tag values must match [A-Za-z0-9_-]; draft ids satisfy this.
+    tags = [{"name": "send_category", "value": "nevsky"}]
+    if draft_id:
+        tags.append({"name": "draft_id", "value": str(draft_id)})
+    result = send_email_via_resend(
+        to=to_address,
+        subject=subject,
+        text=body,
+        html=html_body,
+        from_addr=from_addr,
+        tags=tags,
+        send_category="nevsky",
+    )
+    # Normalize 'to' back to the scalar the old callers logged, for shape parity.
+    if result.get("ok"):
+        result["to"] = to_address
+    return result
 def build_email_summary_and_draft_ai_first(
     subject: str,
     body: str,
