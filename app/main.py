@@ -258,13 +258,20 @@ async def fire_pending_founder_private_cards(child_canonical_name: str = "lilith
         print(f"[founder_private] fetch pending error: {e}")
         return
 
+    # Legacy-Markdown has no reliable backslash escaping, and ONE stray _ * ` or [ in a
+    # dynamic field breaks the WHOLE message's parse → Telegram rejects it. Founder-private
+    # titles can contain anything, so neutralize those chars in interpolated values. The
+    # static template keeps its bold.
+    def _md_safe(s):
+        return "".join(" " if c in "_*`[" else c for c in str(s or ""))
+
     for row in rows:
         req_id, entry_title, question_context = row[0], row[1], row[2]
         text = (
             "🔐 *Founder-Private Access Request*\n\n"
             f"*Lilith* (Jacob Gale) is requesting a founder-private item:\n"
-            f"📄 *{entry_title}*\n\n"
-            + (f"_His question:_ {question_context}\n\n" if question_context else "")
+            f"📄 *{_md_safe(entry_title)}*\n\n"
+            + (f"_His question:_ {_md_safe(question_context)}\n\n" if question_context else "")
             + "Approve → contents are released to Jacob via Lilith.\n"
             "Deny → withheld. Nothing is deleted either way."
         )
@@ -273,14 +280,20 @@ async def fire_pending_founder_private_cards(child_canonical_name: str = "lilith
             {"text": "🚫 Deny", "callback_data": f"lilith_priv_deny:{req_id}"},
         ]]}
         try:
-            await send_sophia_message_with_markup(int(iosif_id), text, markup)
-            with get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE founder_private_access_requests SET card_sent = true WHERE id = %s",
-                        (req_id,),
-                    )
-                    conn.commit()
+            resp = await send_sophia_message_with_markup(int(iosif_id), text, markup)
+            # Only mark sent on confirmed Telegram delivery. If it failed (parse error,
+            # transient), leave card_sent=false so the next Lilith turn retries — a dropped
+            # founder-approval is worse than a retry.
+            if isinstance(resp, dict) and resp.get("ok"):
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE founder_private_access_requests SET card_sent = true WHERE id = %s",
+                            (req_id,),
+                        )
+                        conn.commit()
+            else:
+                print(f"[founder_private] card NOT delivered (req={req_id}); will retry. resp={resp}")
         except Exception as e:
             print(f"[founder_private] card send error (req={req_id}): {e}")
 
