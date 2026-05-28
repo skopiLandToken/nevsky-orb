@@ -655,6 +655,65 @@ COUNTY_REGISTRY = {
             LIMIT 1
         """,
     },
+    "019": {  # Douglas (FIPS 41-019) — Tier 2 Major, Roseburg / Sutherlin / Winston / Myrtle Creek (I-5 corridor)
+        "name": "Douglas",
+        # bbox: Douglas is one of Oregon's largest counties — Pacific coast at
+        # Reedsport east to the Cascade crest, Lane-county south boundary down
+        # to Josephine. I-5 spine through Roseburg / Sutherlin / Myrtle Creek /
+        # Canyonville. Padded so coastal (Reedsport / Winchester Bay) and
+        # crest-edge (Diamond Lake) parcels don't fall through.
+        "bbox": (42.85, 43.85, -124.30, -122.10),
+        # Douglas's Parcels FeatureServer ships joined parcel+account attrs
+        # in one row (Marion / Jackson / Polk pattern) — owner (NAME, 350 char),
+        # full mailing block (ADDR1/2/3 + CSZ), situs (SitusAddress + SitusCSZ),
+        # account family (TAXID + PROP_ID + ALT_ACCTNUM), valuation
+        # (ASSD_VALUE + LAND_MKT_VALUE + IMPRV_VALUE + MARKET_VALUE — the full
+        # RMV + assessed split, richer than Polk which only ships assessed),
+        # acreage (ACCT_ACREAGE + MTL + Total), latest instrument (INST_NO),
+        # sale date (SaleDate), legal description (unbounded LEGAL), property
+        # class (PROPCLASS — 9xx prefix = forest / timber / O&C grant land),
+        # SPECINTEREST flag for special-assessment markers. Zoning is on a
+        # SEPARATE FeatureServer (douglas_zoning, ingested alongside) and joined
+        # LATERALly against the parcel centroid so the COUNTY_REGISTRY contract
+        # still passes only one (lon, lat) tuple. DC_ZONE codes: F1 / F2 / F3 /
+        # FF / FG = forest variants (timber MP differentiator per KB_75);
+        # AW = agricultural watershed (EFU equivalent); 1R/5R/R1-R3/RR =
+        # residential; C1-C3 commercial; M1-M3 industrial.
+        "query": """
+            WITH hit AS (
+                SELECT geom, taxid, prop_id, owner_name, situs_address, situs_csz,
+                       propclass, codearea, acct_acreage, total_acreage
+                FROM parcels_douglas
+                WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+                LIMIT 1
+            )
+            SELECT h.taxid AS taxlot,
+                   LEFT(h.taxid, 6) AS section_id,
+                   ROUND(COALESCE(NULLIF(h.acct_acreage, 0),
+                                  NULLIF(h.total_acreage, 0),
+                                  ST_Area(h.geom::geography) / 4046.8564224)::numeric, 3) AS acres,
+                   ('https://or-douglascounty.civicplus.com/160/Assessment-Search') AS county_url,
+                   LEFT(h.taxid, 6) AS map_number,
+                   h.owner_name,
+                   CASE
+                       WHEN h.situs_address IS NULL OR h.situs_address = '' THEN NULL
+                       ELSE h.situs_address || COALESCE(', ' || NULLIF(h.situs_csz, ''), '')
+                   END AS situs_address,
+                   z.zone_code,
+                   z.zone_code AS zone_label,
+                   ST_AsText(ST_Centroid(h.geom)) AS parcel_centroid,
+                   'Douglas'::text AS county_name,
+                   '019'::text AS county_fips
+            FROM hit h
+            LEFT JOIN LATERAL (
+                SELECT z.zone_code
+                FROM douglas_zoning z
+                WHERE ST_Intersects(z.geom, ST_Centroid(h.geom))
+                ORDER BY ST_Area(ST_Intersection(z.geom, h.geom)) DESC NULLS LAST
+                LIMIT 1
+            ) z ON true
+        """,
+    },
     # Jefferson (031) lands here when its L1 table exists.
 }
 
@@ -1218,6 +1277,9 @@ _OREGON_EPERMITTING_FIPS = {
             #                so fetch_josephine_permits routes Grants Pass away from state Accela.
             #                Cave Junction + Merlin + Selma + Williams + Wolf Creek + O'Brien +
             #                unincorporated Josephine ride state Accela — Tier 2 reuse pattern.
+    "019",  # Douglas      — confirmed via state Accela GlobalSearch hitting Roseburg / Sutherlin /
+            #                Winston / Myrtle Creek / Canyonville jurisdictions. Tier 2 reuse pattern
+            #                (clean fetch_county_permits wrapper, not a county-direct Accela).
     # Deschutes (017) does NOT participate — uses DIAL natively. Multnomah (051)
     # has its own permit system (Portland Maps for COP parcels). Add new FIPS
     # codes here only after confirming via the BCD jurisdiction lookup.
@@ -4177,3 +4239,261 @@ from .josephine_terra import (
     fetch_josephine_records,
     fetch_josephine_permits,
 )
+
+
+# =============================================================================
+# DOUGLAS County L2/L3 (FIPS 019) — Tier 2 Major
+#
+# Pattern reuse: Marion / Jackson / Polk family — L1 ships joined Marion-rich
+# inline attributes (owner / mailing / situs / valuation / acreage / instrument /
+# sale date / propclass / legal). So L2 assessment + records are SQL pass-throughs
+# over parcels_douglas + spatial join against douglas_zoning. No scraper, no
+# viewstate gating, no per-account HTTP on the snapshot fields. L3 is
+# fetch_county_permits('019') — Douglas participates in state Accela (Roseburg /
+# Sutherlin / Winston / Myrtle Creek / Canyonville / unincorporated all route
+# through aca-oregon.accela.com/oregon).
+#
+# Timber capture: PROPCLASS 9xx prefix (forest / O&C grant / timber-deferral) +
+# DC_ZONE F1/F2/F3/FF/FG (forest zoning variants) surface in the snapshot so the
+# timber-land MP positioning angle per KB_75 has structured data.
+# =============================================================================
+_DOUGLAS_ASSESS_LANDING = "https://or-douglascounty.civicplus.com/160/Assessment-Search"
+_DOUGLAS_GIS_VIEWER = (
+    "https://geocortex.co.douglas.or.us/Html5Viewer/index.html?viewer=Douglas_County_GIS.Viewer"
+)
+_DOUGLAS_CLERK_LANDING = "https://or-douglascounty.civicplus.com/216/Clerks-Office"
+_DOUGLAS_GIS_PORTAL = "https://gis.co.douglas.or.us/portal"
+
+_DOUGLAS_FOREST_PROPCLASS_PREFIX = ("9",)  # 9xx = forest / timber / O&C / grant land
+_DOUGLAS_FOREST_ZONES = {"F1", "F2", "F3", "FF", "FG"}
+_DOUGLAS_FARM_ZONES = {"AW"}  # Agricultural Watershed (EFU equivalent)
+
+
+def _douglas_l1_row(taxlot: str):
+    """Pull the parcels_douglas row + spatially-joined zone_code for a taxlot.
+
+    taxlot lookup is on TAXID (canonical 20-char Douglas taxlot, e.g.
+    "19080000100"). Returns None if not found.
+    """
+    try:
+        with _conn() as cn, cn.cursor(row_factory=_psycopg.rows.dict_row) as cur:
+            cur.execute(
+                """
+                WITH hit AS (
+                    SELECT * FROM parcels_douglas WHERE taxid = %s LIMIT 1
+                )
+                SELECT h.*, z.zone_code AS dc_zone,
+                       ST_AsText(ST_Centroid(h.geom)) AS centroid_wkt
+                FROM hit h
+                LEFT JOIN LATERAL (
+                    SELECT z.zone_code FROM douglas_zoning z
+                    WHERE ST_Intersects(z.geom, ST_Centroid(h.geom))
+                    ORDER BY ST_Area(ST_Intersection(z.geom, h.geom)) DESC NULLS LAST
+                    LIMIT 1
+                ) z ON true
+                """,
+                (taxlot,),
+            )
+            return cur.fetchone()
+    except Exception as e:
+        print(f"[douglas_l1] DB error: {e}")
+        return None
+
+
+def _douglas_timber_flag(propclass: str | None, zone_code: str | None) -> dict:
+    """Surface forest-land / farm special-assessment markers for timber-MP angle.
+
+    Returns a structured payload — never invents data, never raises.
+    """
+    is_forest_class = bool(
+        propclass and isinstance(propclass, str)
+        and propclass.startswith(_DOUGLAS_FOREST_PROPCLASS_PREFIX)
+    )
+    is_forest_zone = bool(zone_code and zone_code in _DOUGLAS_FOREST_ZONES)
+    is_farm_zone = bool(zone_code and zone_code in _DOUGLAS_FARM_ZONES)
+    return {
+        "is_forest_class": is_forest_class,
+        "is_forest_zone": is_forest_zone,
+        "is_farm_zone": is_farm_zone,
+        "forest_propclass": propclass if is_forest_class else None,
+        "forest_zone_code": zone_code if is_forest_zone else None,
+        "farm_zone_code": zone_code if is_farm_zone else None,
+        "timber_mp_signal": is_forest_class or is_forest_zone,
+    }
+
+
+def fetch_douglas_assessment(taxlot: str, force_refresh: bool = False) -> dict:
+    """Douglas assessment + ownership + zoning + timber snapshot for a taxlot.
+
+    Pass-through over parcels_douglas L1 inline + douglas_zoning spatial join
+    (no external HTTP). Returns owner / mailing / situs / account / acreage /
+    full real-market + assessed valuation breakdown / property class / latest
+    instrument / sale date / legal description + timber-MP signal (forest
+    PROPCLASS + forest DC_ZONE) + verified deep links to the Douglas Assessment
+    Search civicplus landing and the public Geocortex GIS viewer.
+
+    IN FLIGHT — flagged honestly, never invented:
+      - Multi-year tax payment history — Douglas's Orion Taxlot Information
+        deep-links are behind viewstate / session-token retrieval (same blocker
+        as Marion MCASR, Washington washcotax, Jackson PDO).
+      - Full chain of title — Clerk records portal is behind session gates;
+        we surface latest INST_NO inline and the Clerks-Office landing.
+      - Building details (year built / sqft / bed / bath) — not exposed on the
+        Parcels FeatureServer; Orion deep follow-up required.
+
+    Returns: {found, taxlot, county_fips, snapshot{...}, deep_links{...},
+              timber, in_flight[], fetched_at, from_cache, source}
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    row = _douglas_l1_row(taxlot)
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_douglas", "taxlot": taxlot}
+
+    assd = row["assd_value"]
+    rmv_land = row["land_mkt_value"]
+    rmv_imp = row["imprv_value"]
+    rmv_total = row["market_value"]
+    if rmv_total is None and (rmv_land is not None or rmv_imp is not None):
+        rmv_total = (rmv_land or 0) + (rmv_imp or 0)
+
+    timber = _douglas_timber_flag(row.get("propclass"), row.get("dc_zone"))
+
+    return {
+        "found": True,
+        "from_cache": False,
+        "taxlot": row["taxid"],
+        "county_fips": row["county_fips"],
+        "source": "parcels_douglas L1 inline + douglas_zoning spatial join + Douglas Assessment Search / Geocortex deep links",
+        "snapshot": {
+            "owner": {
+                "primary": row["owner_name"],
+                "mail_addr1": row["mail_addr1"],
+                "mail_addr2": row["mail_addr2"],
+                "mail_addr3": row["mail_addr3"],
+                "mail_csz": row["mail_csz"],
+                "owner_id": row["owner_id"],
+            },
+            "situs": {
+                "address": row["situs_address"],
+                "csz": row["situs_csz"],
+            },
+            "account": {
+                "taxid": row["taxid"],
+                "prop_id": row["prop_id"],
+                "alt_acctnum": row["alt_acctnum"],
+                "propclass": row["propclass"],
+                "specinterest": row["specinterest"],
+                "codearea": row["codearea"],
+                "loc_code": row["loc_code"],
+                "maintarea": row["maintarea"],
+                "nbhdcode": row["nbhdcode"],
+                "block": row["block"],
+                "lot": row["lot"],
+            },
+            "acreage": {
+                "account_of_record": float(row["acct_acreage"]) if row["acct_acreage"] is not None else None,
+                "material": float(row["mtl_acreage"]) if row["mtl_acreage"] is not None else None,
+                "total": float(row["total_acreage"]) if row["total_acreage"] is not None else None,
+            },
+            "zoning": {
+                "code": row.get("dc_zone"),
+                "label": row.get("dc_zone"),
+            },
+            "valuation": {
+                "assessed": float(assd) if assd is not None else None,
+                "rmv_land": float(rmv_land) if rmv_land is not None else None,
+                "rmv_imp": float(rmv_imp) if rmv_imp is not None else None,
+                "rmv_total": float(rmv_total) if rmv_total is not None else None,
+            },
+            "latest_instrument": {
+                "inst_no": row["inst_no"],
+                "sale_date": row["sale_date"],
+            },
+            "legal_description": row["legal"],
+        },
+        "timber": timber,
+        "deep_links": {
+            "assessment_search": _DOUGLAS_ASSESS_LANDING,
+            "gis_viewer": _DOUGLAS_GIS_VIEWER,
+            "gis_portal": _DOUGLAS_GIS_PORTAL,
+            "clerks_office": _DOUGLAS_CLERK_LANDING,
+        },
+        "in_flight": [
+            "Multi-year tax payment history — Douglas's Orion Taxlot Information deep-links are behind viewstate / session-token retrieval; broker click-through from the Assessment Search landing pulls full payment history until structured scrape lands.",
+            "Full chain of title — Clerk records portal is session-gated; latest INST_NO and sale date are surfaced inline, broker click-through from Clerks-Office landing for full chain.",
+            "Building details (year built / sqft / bed / bath) — not exposed on the Parcels FeatureServer; Orion deep follow-up required.",
+        ],
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+
+def fetch_douglas_records(taxlot: str, force_refresh: bool = False) -> dict:
+    """Douglas Clerk recorded-document snapshot.
+
+    Returns the latest instrument-of-record (INST_NO + SaleDate) from
+    parcels_douglas L1 plus the current fee-owner and verified deep links to the
+    Clerks-Office landing and the Geocortex GIS viewer (which deep-links to
+    Orion Taxlot Information for the full document history). Full multi-
+    instrument chain is IN FLIGHT — Clerk recordings portal is session-gated.
+    Honest framing per DOCTRINE-HONEST-IN-FLIGHT-01.
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    row = _douglas_l1_row(taxlot)
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_douglas", "taxlot": taxlot}
+
+    return {
+        "found": True,
+        "from_cache": False,
+        "taxlot": row["taxid"],
+        "county_fips": row["county_fips"],
+        "source": "parcels_douglas L1 latest-instrument inline + Douglas Clerk + Geocortex deep links",
+        "latest_instrument": {
+            "inst_no": row["inst_no"],
+            "sale_date": row["sale_date"],
+        },
+        "owner_of_record": {
+            "primary": row["owner_name"],
+            "mail_addr1": row["mail_addr1"],
+            "mail_csz": row["mail_csz"],
+        },
+        "documents": [],
+        "document_count": 0,
+        "deep_links": {
+            "clerks_office": _DOUGLAS_CLERK_LANDING,
+            "gis_viewer": _DOUGLAS_GIS_VIEWER,
+            "assessment_search": _DOUGLAS_ASSESS_LANDING,
+        },
+        "in_flight": [
+            "Full multi-instrument chain of title — Douglas Clerk recordings portal is session-gated; we surface latest INST_NO + SaleDate inline. Broker click-through from Clerks-Office landing for full chain until session-capture + scrape lands.",
+            "Recorded sale price history — not on the Parcels FeatureServer; Orion deep follow-up required (same blocker as the deed chain).",
+        ],
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+
+def fetch_douglas_permits(taxlot: str, force_refresh: bool = False) -> dict:
+    """Douglas permits — one-line wrapper around fetch_county_permits for FIPS 019.
+
+    Douglas County (Roseburg / Sutherlin / Winston / Myrtle Creek / Canyonville /
+    Reedsport / unincorporated) participates in the Oregon state ePermitting
+    portal at aca-oregon.accela.com/oregon (verified via state Accela
+    GlobalSearch hitting Douglas jurisdictions). Same deep-link-only IN FLIGHT
+    pattern as Benton / Polk / Marion — server-side scrape gated on viewstate
+    capture or Playwright.
+
+    Tier 2 reuse pattern: clean fetch_county_permits wrapper, not a county-
+    direct Accela tenant (no Douglas-direct portal surfaces from the civicplus
+    or city-of-Roseburg pages — all roads route through state Accela).
+    """
+    result = fetch_county_permits(taxlot, "019", force_refresh)
+    if isinstance(result, dict) and result.get("found"):
+        result["routed_via"] = "oregon_state_accela"
+        result["jurisdiction"] = "Douglas County (Roseburg / Sutherlin / Winston / Myrtle Creek / Canyonville / Reedsport / unincorporated — Oregon state Accela)"
+    return result

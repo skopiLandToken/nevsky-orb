@@ -69,6 +69,9 @@ from .orb_db import (
     fetch_polk_assessment,
     fetch_polk_records,
     fetch_polk_permits,
+    fetch_douglas_assessment,
+    fetch_douglas_records,
+    fetch_douglas_permits,
     query_yakov_handoffs,
     query_yakov_commits,
     calculate_lot_yield,
@@ -138,6 +141,9 @@ TIER_TOOLS = {
         "fetch_polk_assessment",
         "fetch_polk_records",
         "fetch_polk_permits",
+        "fetch_douglas_assessment",
+        "fetch_douglas_records",
+        "fetch_douglas_permits",
         "query_yakov_handoffs",
         "query_yakov_commits",
         "calculate_lot_yield",
@@ -187,6 +193,9 @@ TIER_TOOLS = {
         "fetch_polk_assessment",
         "fetch_polk_records",
         "fetch_polk_permits",
+        "fetch_douglas_assessment",
+        "fetch_douglas_records",
+        "fetch_douglas_permits",
         "calculate_lot_yield",
         "web_search",
     ],
@@ -714,6 +723,36 @@ ALL_TOOL_SCHEMAS = {
             "required": ["taxlot"]
         }
     },
+    "fetch_douglas_assessment": {
+        "name": "fetch_douglas_assessment",
+        "description": "TERRA: Fetch the Douglas County assessment + ownership + zoning + timber snapshot for a taxlot (Roseburg / Sutherlin / Winston / Myrtle Creek / Canyonville / Reedsport / Drain / Yoncalla / Oakland / Glendale / Riddle / unincorporated). Use when the user asks about a Douglas County parcel — Southern Oregon I-5 corridor between Eugene and Medford, with major timber + agricultural acreage. Douglas's public Parcels FeatureServer is MARION-RICH plus richer than Polk: source ships joined parcel + account attrs in ONE row — owner_name (NAME, 350 char), full mailing block (addr1/2/3 + csz), situs (address + csz), account family (taxid + prop_id + alt_acctnum + owner_id), property class (PROPCLASS — 9xx prefix = forest / timber / O&C grant land), full valuation breakdown (assessed + RMV land + RMV imp + RMV total — RICHER than Polk which only ships assessed), acreage (account-of-record + material + total/GIS), latest instrument (inst_no + sale_date), legal description (unbounded). NO scraper, NO viewstate gating, NO HTTP per call — pure SQL pass-through over parcels_douglas + spatial join against douglas_zoning (DC_ZONE — F1/F2/F3/FF/FG = forest variants, AW = agricultural watershed / EFU equivalent, R1-R3/RR residential, C1-C3 commercial, M1-M3 industrial). TIMBER MP SIGNAL: returns a structured `timber` block flagging forest-class (PROPCLASS 9xx) + forest-zone (DC_ZONE F-prefix) parcels — TIMBER-LAND MARKETING PARTNER differentiator per KB_75 / TERRA-CLOSER-01. IN FLIGHT — flag honestly: multi-year tax payment history (Orion Taxlot Information deep-links are session-gated); full chain of title (Clerk recordings session-gated); building details (year built / sqft / bed / bath — not on the Parcels FeatureServer). FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (👤 OWNER / 🏠 SITUS / 🧾 ACCOUNT / 🏘️ ZONING / 🌲 TIMBER if timber_mp_signal=true / 💰 VALUATION / 🌍 ACREAGE / 📜 LATEST INSTRUMENT / 🔗 DEEP LINKS). Surface RMV total + assessed prominently in 💰 VALUATION (call out the RMV/assessed split — Douglas ships both, unlike Polk). When `timber.timber_mp_signal=true`, ADD a 🌲 TIMBER section that names the forest PROPCLASS and/or forest DC_ZONE — this is the differentiating fact for the timber MP angle. End with assessment_search + gis_viewer deep links as broker hand-off.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Douglas TAXID (canonical 20-char Douglas taxlot, e.g. '19080000100')."},
+                "force_refresh": {"type": "boolean", "default": False, "description": "Currently no-op — Douglas L2 is a SQL pass-through over L1 inline; freshness comes from the daily L1 delta refresh."}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_douglas_records": {
+        "name": "fetch_douglas_records",
+        "description": "TERRA: Fetch the Douglas County deed / recorded-instrument snapshot for a taxlot. Use when the user asks about deeds, recent transfer, recorded documents, or 'what was the last instrument on this Douglas parcel'. Returns the LATEST instrument-of-record (inst_no + sale_date — sourced from the Parcels FeatureServer, not the Clerk portal) plus the current owner of record (primary + mailing block) and deep links to the Clerks-Office landing + Geocortex GIS viewer (which deep-links to Orion Taxlot Information for full document history). IN FLIGHT — flag honestly: full multi-instrument deed chain (Clerk recordings portal is session-gated — only the latest instrument is in our L1 snapshot; full chain lives behind the Clerks-Office landing); recorded sale price history (not on the Parcels FeatureServer — Orion deep follow-up required). FORMATTING: TERRA aesthetic. 📜 emoji header. Lead with latest_instrument (inst_no + sale_date), then owner_of_record, then the clerks_office deep link. Frame the IN FLIGHT as 'full chain of title is one tap from the Douglas County Clerks Office landing' — never apologize, never fabricate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_douglas_permits": {
+        "name": "fetch_douglas_permits",
+        "description": "TERRA: Fetch building permits for a Douglas County parcel via Oregon's state ePermitting portal (Accela ACA). One-line wrapper around fetch_county_permits('019') — Douglas is Tier 2 Major (Roseburg / Sutherlin / Winston / Myrtle Creek / Canyonville / Reedsport / Drain / Yoncalla / Oakland / Glendale / Riddle / unincorporated). Per the Tier 2 reuse pattern (Polk / Benton / Marion / Lane / Linn): all Douglas jurisdictions route through aca-oregon.accela.com/oregon — no Douglas-direct Accela tenant surfaces from civicplus or city-of-Roseburg pages. IN FLIGHT — same deep-link-only pattern as the Tier 2 cohort: scrape gated on viewstate capture / Playwright. FORMATTING: TERRA aesthetic. 🚧 emoji header. Surface jurisdiction ('Douglas County — Oregon state Accela; Tier 2 reuse pattern'). Frame the deep link as 'one tap from the live state portal.'",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
     "fetch_polk_permits": {
         "name": "fetch_polk_permits",
         "description": "TERRA: Fetch building permits for a Polk County parcel via Oregon's state ePermitting portal (Accela ACA). One-line wrapper around fetch_county_permits('053') — Polk is Tier 2 Major. Per the emerging pattern Clackamas confirmed (Tier 1 Flagships run county-direct Accela tenants, Tier 2/3/4 ride state Accela), Polk jurisdictions — Dallas, Independence, Monmouth, Falls City, Willamina, and unincorporated Polk — all route through aca-oregon.accela.com/oregon. Brief reuse hypothesis VALIDATED — clean fetch_county_permits wrapper, not a county-direct Accela. IN FLIGHT — same deep-link-only pattern as Crook/Marion/Benton: scrape gated on viewstate capture / Playwright. FORMATTING: TERRA aesthetic. 🚧 emoji header. Surface jurisdiction ('Polk County — Oregon state Accela; Tier 2 reuse pattern'). Frame the deep link as 'one tap from the live state portal.'",
@@ -811,6 +850,9 @@ LOCAL_TOOL_FUNCTIONS = {
     "fetch_polk_assessment": fetch_polk_assessment,
     "fetch_polk_records": fetch_polk_records,
     "fetch_polk_permits": fetch_polk_permits,
+    "fetch_douglas_assessment": fetch_douglas_assessment,
+    "fetch_douglas_records": fetch_douglas_records,
+    "fetch_douglas_permits": fetch_douglas_permits,
     "get_site_plans": get_site_plans,
     "get_ai_spend_today": get_ai_spend_today,
     "query_yakov_handoffs": query_yakov_handoffs,
