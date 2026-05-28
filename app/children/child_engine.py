@@ -48,12 +48,18 @@ from .orb_db import (
     fetch_lane_assessment,
     fetch_lane_records,
     fetch_lane_permits,
+    fetch_jackson_assessment,
+    fetch_jackson_records,
+    fetch_jackson_permits,
     fetch_wash_assessment,
     fetch_wash_records,
     fetch_washington_permits,
     fetch_clack_assessment,
     fetch_clack_records,
     fetch_clackamas_permits,
+    fetch_linn_assessment,
+    fetch_linn_records,
+    fetch_linn_permits,
     query_yakov_handoffs,
     query_yakov_commits,
     calculate_lot_yield,
@@ -102,12 +108,18 @@ TIER_TOOLS = {
         "fetch_lane_assessment",
         "fetch_lane_records",
         "fetch_lane_permits",
+        "fetch_jackson_assessment",
+        "fetch_jackson_records",
+        "fetch_jackson_permits",
         "fetch_wash_assessment",
         "fetch_wash_records",
         "fetch_washington_permits",
         "fetch_clack_assessment",
         "fetch_clack_records",
         "fetch_clackamas_permits",
+        "fetch_linn_assessment",
+        "fetch_linn_records",
+        "fetch_linn_permits",
         "query_yakov_handoffs",
         "query_yakov_commits",
         "calculate_lot_yield",
@@ -136,12 +148,18 @@ TIER_TOOLS = {
         "fetch_lane_assessment",
         "fetch_lane_records",
         "fetch_lane_permits",
+        "fetch_jackson_assessment",
+        "fetch_jackson_records",
+        "fetch_jackson_permits",
         "fetch_wash_assessment",
         "fetch_wash_records",
         "fetch_washington_permits",
         "fetch_clack_assessment",
         "fetch_clack_records",
         "fetch_clackamas_permits",
+        "fetch_linn_assessment",
+        "fetch_linn_records",
+        "fetch_linn_permits",
         "calculate_lot_yield",
         "web_search",
     ],
@@ -444,6 +462,42 @@ ALL_TOOL_SCHEMAS = {
             "required": ["taxlot"]
         }
     },
+    "fetch_jackson_assessment": {
+        "name": "fetch_jackson_assessment",
+        "description": "TERRA: Fetch the Jackson County assessment + ownership + zoning snapshot for a taxlot (Medford / Ashland / Central Point / Eagle Point / Jacksonville / Phoenix / Talent / Shady Cove / unincorporated Jackson). Use when the user asks about a parcel in Southern Oregon — anywhere in the Rogue Valley or Jackson proper. JACKSON IS THE CLEANEST DATA ECOSYSTEM TERRA HAS TOUCHED — bulk taxlot service ships native FEEOWNER, SITEADD (situs), full mailing address, ACCOUNT, real-market values (LANDVALUE/IMPVALUE), assessed values (ASSESSLAND/ASSESSIMP), acreage, prop_class, year built, tax_code, commercial sqft, building code, lot dimensions. Zoning + comprehensive-plan designation come from a separate ZoningDistricts FeatureServer spatially joined at lookup time. ALL native — NO scraper, NO viewstate gating, NO upstream HTTP call. IN FLIGHT — flag honestly: multi-year tax payment history (PDO portal deep-link parameterization not yet captured; broker clicks through landing page). FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (👤 OWNER / 🏠 SITUS / 🧾 ACCOUNT / 🏘️ ZONING / 💰 VALUATION / 🏗️ BUILDING / 🌍 ACREAGE / 🔗 DEEP LINKS). Highlight rmv_total in 💰 VALUATION. End with the property_data_online deep link as the broker hand-off.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Full Jackson taxlot ID (MAPLOT format, e.g. '372W25DA100')."},
+                "force_refresh": {"type": "boolean", "default": False, "description": "Currently no-op — Jackson L2 is a SQL pass-through over L1 inline + zoning spatial join; freshness comes from the daily L1 delta refresh."}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_jackson_records": {
+        "name": "fetch_jackson_records",
+        "description": "TERRA: Fetch the Jackson County Clerk recorded-document snapshot for a taxlot. Returns the current fee-owner of record (Jackson's bulk taxlot service ships current ownership inline) plus deep links to the Digital Research Room (OnBase Public Access at apps.jacksoncountyor.gov) and the County Clerk recording info page. IN FLIGHT — Digital Research Room is OnBase Public Access with viewstate-gated document retrieval, same blocker as Marion MCASR / Washington washcotax / Lane Clerk. Full multi-instrument chain of title arrives once we wire OnBase viewstate capture or paid tier. FORMATTING: TERRA aesthetic. 📜 emoji header. Surface current owner-of-record prominently. Frame the IN FLIGHT honestly — 'full chain of title is one tap from the Digital Research Room' — never apologize, never fabricate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Full Jackson taxlot ID (MAPLOT format)."},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_jackson_permits": {
+        "name": "fetch_jackson_permits",
+        "description": "TERRA: Fetch building + land-use permits for a Jackson County parcel via the public GIS Permit FeatureServer. JACKSON IS SPECIAL — unlike Crook / Marion / Lane (where Accela is viewstate-blocked and we return deep-link-only), Jackson publishes 243k building permits + 40k land-use permits as a point FeatureServer at spatial.jacksoncountyor.gov DevServ/Permit with PRE-BUILT ACA-Oregon Accela CapDetail deep links on every record. fetch_jackson_permits runs a live spatial query (parcel envelope intersects permit point) and returns REAL STRUCTURED PERMITS. Use when the user asks about permits, building activity, development status on any Jackson taxlot. Returns permit_count, bldg_count, landuse_count, jurisdictions list, permits list (each with PERMITID, PERMITDESC, ESTCOST, SUBMITDT_iso, APPROVEDT_iso, APPLICANT, FULLADDR, LOCDESC, PERMITTYPE, PERMITSTAT, JURISDICTION, LINK to ACA CapDetail, STATUSCAT, _layer={'Building','Land Use'}). 24h cached. FORMATTING: TERRA aesthetic. 🚧 emoji header. Group by jurisdiction or status. Call out anything filed in the last 12 months as 'active development' vs older permits as 'history.' Surface the LINK on each permit as the broker hand-off to Accela detail. This is the cleanest permit data TERRA has — flex it.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Full Jackson taxlot ID (MAPLOT format)."},
+                "force_refresh": {"type": "boolean", "default": False, "description": "Bypass 24h cache and re-pull from the live Jackson GIS Permit FeatureServer."}
+            },
+            "required": ["taxlot"]
+        }
+    },
     "fetch_wash_assessment": {
         "name": "fetch_wash_assessment",
         "description": "TERRA: Fetch the Washington County assessment + property snapshot for a taxlot. Use when the user asks about a parcel in Beaverton / Hillsboro / Tigard / Forest Grove / unincorporated Washington — anywhere west-of-Portland-metro. Returns acreage, map_number, taxlot_short, parcel centroid, live zoning code from the Intermap Land Use layer, plus verified deep links to the A&T portal (washcotax) and the official Washington County A&T page. IN FLIGHT — flag honestly: owner, situs, valuation snapshot, multi-year certified values, sales history, deed instruments, tax payment history all live behind washcotax.co.washington.or.us, which is DotNetNuke + ASP.NET WebForms with viewstate-gated TLNO → R-number resolution. Same fight as Crook's Accela scrape and Multnomah's MultcoPropTax — captcha-equivalent. Until the viewstate scrape or paid-tier lands, surface what we have (size + zoning + deep links) and frame the rest as 'coming soon — broker can click through.' FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (🌍 SIZE / 🏘️ ZONING / 📍 LOCATION / 🔗 DEEP LINKS). List IN FLIGHT items at end as 'coming soon' — never apologize. Always end with the at_search_by_taxlot deep link.",
@@ -516,6 +570,42 @@ ALL_TOOL_SCHEMAS = {
             "required": ["taxlot"]
         }
     },
+    "fetch_linn_assessment": {
+        "name": "fetch_linn_assessment",
+        "description": "TERRA: Linn County (FIPS 41-043) assessment + property snapshot for a taxlot. Tier 2 Major county — mid-Willamette industrial corridor between Salem and Eugene (Albany / Lebanon / Sweet Home / Brownsville / Harrisburg / Halsey / Tangent / Scio / Mill City / Lyons). Built on parcels_linn Layer 1 (ORMAP cartographic polygons — Taxlot/MapTaxlot/ORTaxlot/MapNumber + three acreage measures) joined with Linn pub_sales MapServer (canonical sales surface — every row is a recorded deed with seller/buyer/instrument/sale_price/sale_date/site_addr/site_city/account/prop_class/sqft/yearblt/beds/baths). The latest pub_sales row gives a real owner + situs + last-sale snapshot. Use when the user asks about ownership / property snapshot / valuation / size / classification on a Linn County taxlot. Returns: {found, taxlot, map_taxlot, or_taxlot, map_number, account_number, snapshot{owner_latest, situs, last_sale, classification, improvements, area}, deep_links, in_flight[]}. IN FLIGHT: current-year RMV / AV / multi-year tax payment history — Linn County primary site is Cloudflare gated; per-account portal URL not yet captured. Snapshot is LAST-SALE row from pub_sales, not the current roll. FORMATTING: TERRA aesthetic. Vault-opening reveal. Honest IN FLIGHT.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Linn taxlot — accepts the 5-char suffix, MapTaxlot, or ORTaxlot."},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_linn_records": {
+        "name": "fetch_linn_records",
+        "description": "TERRA: Linn County recorded-documents / deed chain / sales history for a taxlot. Built on Linn pub_sales MapServer — every row IS a deed Recording with Recording#/Instrument(WD/QC)/grantor/grantee/sale_price/sale_date/site_addr/site_city/financing/remark. Returns the FULL chain by PIN most-recent-first. Use when the user asks about deed chain / sales history / chain of title on a Linn taxlot. Returns: {found, taxlot, owner_name, snapshot, documents[], document_count, deep_links, in_flight[]}. Cached 24h. IN FLIGHT: Linn Clerk recordings direct search portal — county site Cloudflare-gated; portal URL not yet captured. FORMATTING: TERRA aesthetic. Recordings reverse-chronologically. Surface Recording# (e.g. DN 2022-4183) for Clerk cross-reference.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Linn taxlot — accepts the 5-char suffix, MapTaxlot, or ORTaxlot."},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_linn_permits": {
+        "name": "fetch_linn_permits",
+        "description": "TERRA: Fetch building permits for a Linn County parcel. Routes by site_city pulled from the latest pub_sales row: (a) ALBANY -> permits.albanyoregon.gov + albanyor.buildingeye.com (Albany runs its OWN city portal — verified during s5 recon, NOT state Accela); (b) Lebanon / Sweet Home / Brownsville / Mill City / Lyons / Scio / Harrisburg / Halsey / Tangent / smaller cities / unincorporated Linn -> Oregon state Accela via fetch_county_permits(043); (c) Unknown jurisdiction -> dual-surface deep links. Returns: routed_via, jurisdiction, site_address, site_city, status, permits[], deep_links, in_flight notes. JURISDICTION NOTE — Albany is the ONLY incorporated Linn city verified during recon as running its own portal. FORMATTING: TERRA aesthetic. emoji header. Branch on routed_via.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Linn taxlot — accepts the 5-char suffix, MapTaxlot, or ORTaxlot."},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot"]
+        }
+    },
     "calculate_lot_yield": {
         "name": "calculate_lot_yield",
         "description": "TERRA — SPECULATIVE residential lot-yield analysis. Verify with planning office before quoting. Computes a rough estimate of how many residential lots could theoretically be carved from a Deschutes County parcel and (optionally) the gross retail value if the broker provides a per-lot market estimate. CALL when a broker asks 'how many lots can I get on parcel X', 'what's parcel X worth as a development', 'what's the yield on this taxlot', or after a TERRA SCAN COMPLETE on a residential parcel ≥1.0 acre. INPUTS: parcel_id (taxlot string, required). Optional: deduction_override (0-1 fraction for roads/utilities/setbacks; default 0.25 = 25%), per_lot_value_override (USD per finished lot — broker's own market number; if omitted, the tool returns a yield-only result and prompts the broker for their estimate), target_zone_override (force a different zone for what-if rezone scenarios). BEHAVIOR: (a) if the parcel has no zoning on file, the tool live-queries the county GIS service and caches the result — adds ~500ms latency but completes the call. (b) Non-residential zones return an informational dict (not an error) noting yield-calc doesn't apply. (c) Zones outside the seed lookup return a structured error with guidance — NO fake numbers. (d) Every result carries a footer disclaimer: 'TERRA estimate — actual yield subject to site conditions, plat approval, and jurisdictional review. Verify with the city/county planning office before underwriting.' DOCTRINE: per DOCTRINE-TERRA-ANALYSIS-TOOL-01, this tool is speculative analysis only — never quote outputs as certified yield or appraised value. Per DOCTRINE-YIELD-HOOK-THEN-CLOSE-01, the v1 output is the broker hook; v2 'deep dive' refinement (setbacks, slope, wetlands) comes later. FORMATTING for Sophia's reply: render the result as a TERRA card with the broker-friendly numbers up front (lot_yield, gross_retail if available), then assumptions, then the footer. NEVER omit the footer.",
@@ -583,12 +673,18 @@ LOCAL_TOOL_FUNCTIONS = {
     "fetch_lane_assessment": fetch_lane_assessment,
     "fetch_lane_records": fetch_lane_records,
     "fetch_lane_permits": fetch_lane_permits,
+    "fetch_jackson_assessment": fetch_jackson_assessment,
+    "fetch_jackson_records": fetch_jackson_records,
+    "fetch_jackson_permits": fetch_jackson_permits,
     "fetch_wash_assessment": fetch_wash_assessment,
     "fetch_wash_records": fetch_wash_records,
     "fetch_washington_permits": fetch_washington_permits,
     "fetch_clack_assessment": fetch_clack_assessment,
     "fetch_clack_records": fetch_clack_records,
     "fetch_clackamas_permits": fetch_clackamas_permits,
+    "fetch_linn_assessment": fetch_linn_assessment,
+    "fetch_linn_records": fetch_linn_records,
+    "fetch_linn_permits": fetch_linn_permits,
     "get_site_plans": get_site_plans,
     "get_ai_spend_today": get_ai_spend_today,
     "query_yakov_handoffs": query_yakov_handoffs,

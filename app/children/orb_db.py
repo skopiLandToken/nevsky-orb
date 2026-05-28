@@ -454,6 +454,75 @@ COUNTY_REGISTRY = {
             LIMIT 1
         """,
     },
+    "029": {  # Jackson (FIPS 41-029) — Tier 2 Major, Southern Oregon (Medford, Ashland, Central Point)
+        "name": "Jackson",
+        # bbox: Rogue Valley core + Cascade-crest east edge + California-border tail.
+        "bbox": (41.95, 43.15, -123.50, -122.20),
+        # Zoning is on a SEPARATE FeatureServer (jackson_zoning) — joined LATERALly
+        # against the parcel centroid so the COUNTY_REGISTRY contract still passes
+        # only one (lon, lat) parameter tuple.
+        "query": """
+            WITH hit AS (
+                SELECT *
+                FROM parcels_jackson
+                WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+                LIMIT 1
+            )
+            SELECT hit.taxlot,
+                   COALESCE(hit.map_num, hit.map_number) AS section_id,
+                   ROUND(hit.acreage::numeric, 3) AS acres,
+                   'https://pdo.jacksoncountyor.gov/pdo/index.cfm' AS county_url,
+                   COALESCE(hit.map_number, hit.map_num) AS map_number,
+                   hit.owner_name,
+                   hit.situs_address,
+                   z.zone_code,
+                   COALESCE(z.zone_code || ' / ' || z.zone_desc, z.zone_code) AS zone_label,
+                   ST_AsText(ST_Centroid(hit.geom)) AS parcel_centroid,
+                   'Jackson'::text AS county_name,
+                   '029'::text AS county_fips
+            FROM hit
+            LEFT JOIN LATERAL (
+                SELECT z.zone_code, z.zone_desc
+                FROM jackson_zoning z
+                WHERE ST_Intersects(z.geom, ST_Centroid(hit.geom))
+                ORDER BY ST_Area(ST_Intersection(z.geom, hit.geom)) DESC NULLS LAST
+                LIMIT 1
+            ) z ON true
+        """,
+    },
+    "043": {  # Linn (FIPS 41-043) — Tier 2 Major, mid-Willamette industrial corridor
+        "name": "Linn",
+        # bbox: covers Albany + Lebanon + Sweet Home + Brownsville + Harrisburg +
+        # Halsey + Tangent + Scio + Mill City + Lyons + Idanha + unincorporated.
+        # Linn sits south of Marion, north of Lane, west of Deschutes. Padded
+        # slightly so the Cascade-edge towns (Idanha) don't fall through.
+        "bbox": (44.20, 44.80, -123.30, -121.85),
+        "query": """
+            SELECT taxlot,
+                   map_number AS section_id,
+                   ROUND(COALESCE(taxlot_acre, calculated_acres, map_acres)::numeric, 3) AS acres,
+                   -- Linn County's primary site is Cloudflare managed-challenge
+                   -- gated; per-account portal URL not yet captured. Assessor home
+                   -- is the canonical clickable until that lands. fetch_linn_assessment
+                   -- returns the structured payload (joins pub_sales MapServer for
+                   -- owner/situs/last-sale snapshot).
+                   'https://www.linncountyor.gov/assessor' AS county_url,
+                   map_number,
+                   -- Linn L1 ships only ORMAP polygon attributes (no owner/situs
+                   -- inline). Owner + situs are resolved on demand by
+                   -- fetch_linn_assessment via pub_sales MapServer.
+                   NULL::text AS owner_name,
+                   NULL::text AS situs_address,
+                   NULL::text AS zone_code,
+                   NULL::text AS zone_label,
+                   ST_AsText(ST_Centroid(geom)) AS parcel_centroid,
+                   'Linn'::text AS county_name,
+                   '043'::text AS county_fips
+            FROM parcels_linn
+            WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            LIMIT 1
+        """,
+    },
     # Jefferson (031) lands here when its L1 table exists.
 }
 
@@ -996,6 +1065,11 @@ _OREGON_EPERMITTING_FIPS = {
     "013",  # Crook        — confirmed via co.crook.or.us/commdev FAQ
     "031",  # Jefferson    — historically participates; verify per-build
     "039",  # Lane         — partial; participates for some jurisdictions
+    "043",  # Linn         — partial; Albany runs its OWN portal at permits.albanyoregon.gov,
+            #                so the Albany-jurisdiction branch in fetch_linn_permits routes
+            #                away from state Accela. Lebanon / Sweet Home / Brownsville /
+            #                smaller cities / unincorporated Linn ride the state portal as a
+            #                deep-link-only landing (IN FLIGHT verification per jurisdiction).
     "047",  # Marion       — confirmed via the Marion County PublicWorksPermits GIS
             #                service (gis.co.marion.or.us/.../PublicWorksPermits) whose
             #                description states permits are "as entered in Accela"; the
@@ -2801,6 +2875,448 @@ def fetch_clackamas_permits(taxlot: str, force_refresh: bool = False) -> dict:
 
 
 # =============================================================================
+# JACKSON Layer 2 + Layer 3 Fetchers (s4 Yindo session — 2026-05-27, FIRST TIER 2 MAJOR)
+# =============================================================================
+# Reality check (2026-05-27, s4 Yindo session — first Tier 2 county shipped):
+# Jackson is the cleanest data ecosystem of any Oregon county TERRA has touched.
+# Three loads, three honest reads:
+#
+#   1. Layer 1 inline is Marion-rich plus more — FEEOWNER, SITEADD, full mailing
+#      address, ACCOUNT, real-market values (LANDVALUE / IMPVALUE), assessed
+#      values (ASSESSLAND / ASSESSIMP), acreage, prop_class, year built, tax
+#      code, commercial sqft, building code, lot dimensions. Zoning is NOT
+#      inline (separate ZoningDistricts FeatureServer on the same on-prem
+#      server, ingested into jackson_zoning as L1 supplementary). So
+#      fetch_jackson_assessment is a SQL pass-through over L1 inline +
+#      jackson_zoning spatial join — NO scraper, NO viewstate gating, NO HTTP.
+#
+#   2. Layer 2 records — Jackson Clerk recordings live at
+#      apps.jacksoncountyor.gov/DigitalResearchRoomPublic (OnBase Public
+#      Access). Search-only API, viewstate-gated retrieval. Same IN FLIGHT
+#      pattern as Marion / Washington / Lane — surface the most-recent
+#      fee-owner from L1 inline plus a verified deep link.
+#
+#   3. Layer 3 permits — JACKSON IS SPECIAL. Jackson publishes 243k building
+#      permits + 40k land-use permits as a public point FeatureServer at
+#      spatial.jacksoncountyor.gov DevServ/Permit, with PRE-BUILT ACA-Oregon
+#      Accela CapDetail deep links on every record. fetch_jackson_permits
+#      runs a live spatial query (parcel envelope intersects permit point)
+#      and returns REAL STRUCTURED PERMITS with deep links — NOT the
+#      deep-link-only fallback we use for Crook / Marion (where the Accela
+#      scrape is viewstate-blocked). This is the cleanest permit Layer 3
+#      shipped to date and the blueprint for any future county that exposes
+#      permits via GIS REST.
+# =============================================================================
+
+_JACKSON_PERMITS_CACHE_TTL_HOURS = 24
+_JACKSON_PDO_BASE = "https://pdo.jacksoncountyor.gov/pdo/index.cfm"
+_JACKSON_CLERK_RECORDS_PAGE = "https://apps.jacksoncountyor.gov/DigitalResearchRoomPublic"
+_JACKSON_RECORDING_INFO_PAGE = (
+    "https://jacksoncountyor.gov/departments/clerk/recording/"
+    "services/recorded_document_research_and_copies.php"
+)
+_JACKSON_TAXMAP_BASE = (
+    "https://spatial.jacksoncountyor.gov/arcgis/rest/services/"
+    "Assessment/MapIndex/MapServer"
+)
+_JACKSON_PERMITS_BLDG_URL = (
+    "https://spatial.jacksoncountyor.gov/arcgis/rest/services/"
+    "DevServ/Permit/FeatureServer/0/query"
+)
+_JACKSON_PERMITS_LANDUSE_URL = (
+    "https://spatial.jacksoncountyor.gov/arcgis/rest/services/"
+    "DevServ/Permit/FeatureServer/1/query"
+)
+_JACKSON_USER_AGENT = "SKOpi-TERRA/1.0 (+https://skopi.io)"
+
+
+def _jackson_l1_row(taxlot: str):
+    """Fetch the L1 row for a Jackson taxlot + spatially-joined zoning + bbox.
+
+    Returns a dict with all inline assessor fields, the spatially-joined zone
+    code/desc/comp-plan-des, the parcel centroid (text WKT), and the parcel
+    envelope coordinates so callers don't need a second query.
+    """
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT p.taxlot, p.county_fips, p.account, p.lottype,
+                       p.map_number, p.map_num, p.tm_maplot,
+                       p.owner_name, p.contract_buyer, p.in_care_of,
+                       p.mailing_address_1, p.mailing_address_2,
+                       p.mailing_city, p.mailing_state, p.mailing_zip,
+                       p.situs_address, p.address_num, p.street_name,
+                       p.prop_class, p.build_code, p.year_built, p.comm_sqft,
+                       p.lot_depth, p.lot_width,
+                       p.acreage, p.gis_area,
+                       p.land_value, p.imp_value,
+                       p.assess_land, p.assess_imp,
+                       p.tax_code,
+                       ST_AsText(ST_Centroid(p.geom)) AS parcel_centroid,
+                       ST_XMin(p.geom) AS xmin, ST_YMin(p.geom) AS ymin,
+                       ST_XMax(p.geom) AS xmax, ST_YMax(p.geom) AS ymax,
+                       z.zone_code, z.zone_desc, z.comp_plan_des,
+                       p.ingested_at
+                FROM parcels_jackson p
+                LEFT JOIN LATERAL (
+                    SELECT z.zone_code, z.zone_desc, z.comp_plan_des
+                    FROM jackson_zoning z
+                    WHERE ST_Intersects(z.geom, ST_Centroid(p.geom))
+                    ORDER BY ST_Area(ST_Intersection(z.geom, p.geom)) DESC NULLS LAST
+                    LIMIT 1
+                ) z ON true
+                WHERE p.taxlot = %s
+                LIMIT 1
+                """,
+                (taxlot,),
+            )
+            return cur.fetchone()
+    except Exception as e:
+        print(f"[jackson_l1_row] DB error: {e}")
+        return None
+
+
+def fetch_jackson_assessment(taxlot: str, force_refresh: bool = False) -> dict:
+    """Jackson assessment + ownership + zoning snapshot for a taxlot.
+
+    Pass-through over parcels_jackson L1 inline + jackson_zoning spatial join
+    (no external HTTP). Returns owner / situs / mailing / account / acreage /
+    current real-market + assessed valuation / building metrics / zoning code +
+    description + comp-plan designation, plus verified deep links to the
+    Jackson Property Data Online portal and the Clerk's Digital Research Room.
+
+    IN FLIGHT — flagged honestly, never invented:
+      - Multi-year tax payment history → PDO deep-link parameterization is not
+        yet confirmed; the broker clicks through and pastes the account.
+      - Full deed chain → Digital Research Room is OnBase Public Access with
+        viewstate retrieval; surface most-recent owner from L1 + deep link.
+
+    Returns: {found, taxlot, county_fips, snapshot{...}, deep_links{...},
+              in_flight[], fetched_at, from_cache, source}
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    row = _jackson_l1_row(taxlot)
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_jackson", "taxlot": taxlot}
+
+    rmv_land = row["land_value"]
+    rmv_imp = row["imp_value"]
+    rmv_total = (rmv_land or 0) + (rmv_imp or 0) if (rmv_land is not None or rmv_imp is not None) else None
+    assess_land = row["assess_land"]
+    assess_imp = row["assess_imp"]
+    assess_total = (assess_land or 0) + (assess_imp or 0) if (assess_land is not None or assess_imp is not None) else None
+
+    return {
+        "found": True,
+        "from_cache": False,
+        "taxlot": row["taxlot"],
+        "county_fips": row["county_fips"],
+        "source": "parcels_jackson L1 inline + jackson_zoning spatial join + Jackson PDO/Clerk deep links",
+        "snapshot": {
+            "owner": {
+                "primary": row["owner_name"],
+                "contract_buyer": row["contract_buyer"],
+                "in_care_of": row["in_care_of"],
+                "mailing_address_1": row["mailing_address_1"],
+                "mailing_address_2": row["mailing_address_2"],
+                "mailing_city": row["mailing_city"],
+                "mailing_state": row["mailing_state"],
+                "mailing_zip": row["mailing_zip"],
+            },
+            "situs": {
+                "address": row["situs_address"],
+                "address_num": row["address_num"],
+                "street_name": row["street_name"],
+            },
+            "account": {
+                "number": row["account"],
+                "lottype": row["lottype"],
+                "prop_class": row["prop_class"],
+                "tax_code": row["tax_code"],
+                "map_number": row["map_number"],
+                "map_num": row["map_num"],
+                "tm_maplot": row["tm_maplot"],
+            },
+            "acreage": {
+                "assessor_of_record": float(row["acreage"]) if row["acreage"] is not None else None,
+                "gis_sqft": float(row["gis_area"]) if row["gis_area"] is not None else None,
+            },
+            "zoning": {
+                "code": row["zone_code"],
+                "label": row["zone_desc"],
+                "comp_plan_designation": row["comp_plan_des"],
+            },
+            "valuation": {
+                "rmv_land": rmv_land,
+                "rmv_imp": rmv_imp,
+                "rmv_total": rmv_total,
+                "assessed_land": assess_land,
+                "assessed_imp": assess_imp,
+                "assessed_total": assess_total,
+            },
+            "building": {
+                "build_code": row["build_code"],
+                "year_built": row["year_built"],
+                "commercial_sqft": row["comm_sqft"],
+                "lot_depth": row["lot_depth"],
+                "lot_width": row["lot_width"],
+            },
+        },
+        "deep_links": {
+            "property_data_online": _JACKSON_PDO_BASE,
+            "clerk_records_room": _JACKSON_CLERK_RECORDS_PAGE,
+            "clerk_info_page": _JACKSON_RECORDING_INFO_PAGE,
+            "tax_map_service": _JACKSON_TAXMAP_BASE,
+        },
+        "in_flight": [
+            "Property Data Online (PDO) deep-link parameterization — landing page accepts account / owner / address search; the ?Account= query string is not yet confirmed, so the broker clicks through and pastes ACCOUNT to land on the parcel detail.",
+            "Multi-year tax payment history — same PDO viewstate-gated retrieval pattern as Marion / Crook; coming once we wire viewstate capture or paid tier.",
+            "Full chain-of-title — Digital Research Room (OnBase Public Access) deep link surfaced for the broker; structured scrape IN FLIGHT.",
+        ],
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+
+def fetch_jackson_records(taxlot: str, force_refresh: bool = False) -> dict:
+    """Jackson Clerk recorded-document snapshot.
+
+    Returns the most-recent fee-owner from parcels_jackson L1 (Jackson's bulk
+    taxlot service ships the current fee-owner inline) plus deep links to the
+    Digital Research Room and the County Clerk recording page. The
+    multi-instrument history is IN FLIGHT because the Digital Research Room is
+    OnBase Public Access with viewstate-gated retrieval — same scrape blocker
+    we hit on Marion's MCASR PropertySummary and Washington's washcotax. Honest
+    framing per DOCTRINE-HONEST-IN-FLIGHT-01.
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    row = _jackson_l1_row(taxlot)
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_jackson", "taxlot": taxlot}
+
+    return {
+        "found": True,
+        "from_cache": False,
+        "taxlot": row["taxlot"],
+        "county_fips": row["county_fips"],
+        "source": "parcels_jackson L1 inline owner-of-record + Jackson Clerk deep links",
+        "owner_of_record": {
+            "primary": row["owner_name"],
+            "contract_buyer": row["contract_buyer"],
+            "in_care_of": row["in_care_of"],
+            "mailing_address_1": row["mailing_address_1"],
+            "mailing_city": row["mailing_city"],
+            "mailing_state": row["mailing_state"],
+            "mailing_zip": row["mailing_zip"],
+        },
+        "deep_links": {
+            "digital_research_room": _JACKSON_CLERK_RECORDS_PAGE,
+            "clerk_info_page": _JACKSON_RECORDING_INFO_PAGE,
+            "property_data_online": _JACKSON_PDO_BASE,
+        },
+        "in_flight": [
+            "Full multi-instrument chain of title — Digital Research Room is OnBase Public Access with viewstate-gated document retrieval; deep link lets the broker pull the full chain themselves until structured scrape lands.",
+            "Recorded sale price + instrument number history — same blocker as the deed chain.",
+        ],
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+
+def _jackson_query_permits(layer_url: str, xmin: float, ymin: float, xmax: float, ymax: float) -> list[dict]:
+    """Hit the Jackson DevServ/Permit FeatureServer with a parcel-envelope spatial filter.
+
+    Returns a list of permit dicts (raw attributes plus convenience fields).
+    Empty list on miss, raises on transport failure (caller catches).
+
+    Why envelope rather than full polygon? Permit POINTS that touch a parcel's
+    bounding box are 1:1 mapped to that parcel's locator the county uses
+    upstream — the small risk of capturing an off-parcel point at the bbox
+    edges is acceptable in v1 (we surface the FULLADDR and LOCDESC so the
+    broker can sanity-check), and the envelope query is dramatically faster
+    than the full polygon ST_Intersects path on a 243k-row layer.
+    """
+    params = {
+        "where": "1=1",
+        "outFields": "*",
+        "geometry": f"{xmin},{ymin},{xmax},{ymax}",
+        "geometryType": "esriGeometryEnvelope",
+        "inSR": "4326",
+        "spatialRel": "esriSpatialRelIntersects",
+        "f": "json",
+        "resultRecordCount": "200",
+    }
+    # Jackson's ArcGIS Server returns a "Content-Security-Policy : ..." header
+    # with a SPACE before the colon — violates RFC 7230, httpx refuses to parse
+    # the response. urllib is lenient enough to accept it. Same pattern is used
+    # by the parcel ingest script (`urllib.request.urlopen`) — keep consistent.
+    from urllib.parse import urlencode as _urlencode
+    from urllib.request import Request as _UrlReq, urlopen as _urlopen
+    url = layer_url + "?" + _urlencode(params)
+    try:
+        req = _UrlReq(url, headers={"User-Agent": _JACKSON_USER_AGENT, "Accept": "application/json"})
+        with _urlopen(req, timeout=20.0) as resp:
+            payload = _json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        raise RuntimeError(f"Jackson permits fetch failed: {e}") from e
+
+    features = payload.get("features", []) or []
+    out = []
+    for f in features:
+        attrs = f.get("attributes", {}) or {}
+        for k in ("SUBMITDT", "APPROVEDT"):
+            v = attrs.get(k)
+            if isinstance(v, (int, float)) and v:
+                try:
+                    attrs[k + "_iso"] = _dt.fromtimestamp(v / 1000, tz=_tz.utc).date().isoformat()
+                except Exception:
+                    pass
+        out.append(attrs)
+    return out
+
+
+def fetch_jackson_permits(taxlot: str, force_refresh: bool = False) -> dict:
+    """Live permits for a Jackson parcel via the public GIS Permit FeatureServer.
+
+    NOT a fetch_county_permits wrapper. Jackson publishes 243k building permits
+    + 40k land-use permits as a point FeatureServer at spatial.jacksoncountyor.gov
+    with PRE-BUILT ACA-Oregon Accela CapDetail deep links on every record, so we
+    can return REAL structured permit data — NOT the deep-link-only fallback
+    that fetch_county_permits returns for counties where Accela is viewstate-
+    gated.
+
+    Strategy: pull the parcel envelope from parcels_jackson; spatial-intersect
+    against /DevServ/Permit/FeatureServer/0 (Building) and /1 (Land Use); cache
+    the joined result 24h in jackson_permits_cache.
+
+    Returns: {found, taxlot, county_fips, permit_count, bldg_count, landuse_count,
+              permits[], jurisdictions[], deep_links{aca_search}, fetched_at,
+              from_cache, in_flight[]}
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    if not force_refresh:
+        try:
+            with _conn() as cn, cn.cursor() as cur:
+                cur.execute(
+                    "SELECT permits_json, permit_count, bldg_count, landuse_count, "
+                    "       query_bbox, fetched_at, last_error "
+                    "FROM jackson_permits_cache WHERE taxlot = %s",
+                    (taxlot,),
+                )
+                cached = cur.fetchone()
+                if cached:
+                    age = _dt.now(_tz.utc) - cached["fetched_at"]
+                    if age < _td(hours=_JACKSON_PERMITS_CACHE_TTL_HOURS):
+                        permits = cached["permits_json"] or []
+                        return {
+                            "found": True,
+                            "from_cache": True,
+                            "cached_age_hours": round(age.total_seconds() / 3600, 1),
+                            "taxlot": taxlot,
+                            "county_fips": "029",
+                            "permit_count": cached["permit_count"],
+                            "bldg_count": cached["bldg_count"],
+                            "landuse_count": cached["landuse_count"],
+                            "permits": permits,
+                            "jurisdictions": sorted({p.get("JURISDICTION") for p in permits if p.get("JURISDICTION")}),
+                            "deep_links": {
+                                "aca_jackson_search": "https://aca-oregon.accela.com/oregon/Cap/CapHome.aspx?module=Building&AgencyCode=JACKSON_CO",
+                            },
+                            "fetched_at": cached["fetched_at"].isoformat(),
+                            "in_flight": [],
+                        }
+        except Exception as e:
+            print(f"[jackson_permits] cache read error: {e}")
+
+    row = _jackson_l1_row(taxlot)
+    if not row:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_jackson", "taxlot": taxlot}
+
+    xmin, ymin = float(row["xmin"]), float(row["ymin"])
+    xmax, ymax = float(row["xmax"]), float(row["ymax"])
+    bbox_str = f"{xmin:.6f},{ymin:.6f},{xmax:.6f},{ymax:.6f}"
+
+    try:
+        bldg = _jackson_query_permits(_JACKSON_PERMITS_BLDG_URL, xmin, ymin, xmax, ymax)
+        landuse = _jackson_query_permits(_JACKSON_PERMITS_LANDUSE_URL, xmin, ymin, xmax, ymax)
+    except Exception as e:
+        try:
+            with _conn() as cn, cn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO jackson_permits_cache
+                          (taxlot, permits_json, permit_count, bldg_count, landuse_count,
+                           query_bbox, fetched_at, last_error)
+                       VALUES (%s, '[]'::jsonb, 0, 0, 0, %s, NOW(), %s)
+                       ON CONFLICT (taxlot) DO UPDATE SET
+                          query_bbox = EXCLUDED.query_bbox,
+                          fetched_at = NOW(),
+                          last_error = EXCLUDED.last_error""",
+                    (taxlot, bbox_str, str(e)),
+                )
+                cn.commit()
+        except Exception:
+            pass
+        return {"found": False, "taxlot": taxlot, "reason": f"Jackson permits fetch error: {e}"}
+
+    for p in bldg:
+        p["_layer"] = "Building"
+    for p in landuse:
+        p["_layer"] = "Land Use"
+    permits = bldg + landuse
+    permits.sort(key=lambda p: p.get("SUBMITDT") or 0, reverse=True)
+
+    jurisdictions = sorted({p.get("JURISDICTION") for p in permits if p.get("JURISDICTION")})
+
+    payload = {
+        "found": True,
+        "from_cache": False,
+        "taxlot": taxlot,
+        "county_fips": "029",
+        "permit_count": len(permits),
+        "bldg_count": len(bldg),
+        "landuse_count": len(landuse),
+        "permits": permits,
+        "jurisdictions": jurisdictions,
+        "deep_links": {
+            "aca_jackson_search": "https://aca-oregon.accela.com/oregon/Cap/CapHome.aspx?module=Building&AgencyCode=JACKSON_CO",
+        },
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+        "in_flight": [],
+    }
+
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO jackson_permits_cache
+                      (taxlot, permits_json, permit_count, bldg_count, landuse_count,
+                       query_bbox, fetched_at, last_error)
+                   VALUES (%s, %s::jsonb, %s, %s, %s, %s, NOW(), NULL)
+                   ON CONFLICT (taxlot) DO UPDATE SET
+                      permits_json = EXCLUDED.permits_json,
+                      permit_count = EXCLUDED.permit_count,
+                      bldg_count = EXCLUDED.bldg_count,
+                      landuse_count = EXCLUDED.landuse_count,
+                      query_bbox = EXCLUDED.query_bbox,
+                      fetched_at = NOW(),
+                      last_error = NULL""",
+                (taxlot, _json.dumps(permits), len(permits), len(bldg), len(landuse), bbox_str),
+            )
+            cn.commit()
+    except Exception as e:
+        print(f"[jackson_permits] cache write error: {e}")
+
+    return payload
+
+
+# =============================================================================
 # YAKOV OMNISCIENCE — handoff and commit queries (DOCTRINE-NEVSKY-OMNISCIENCE-01)
 # =============================================================================
 
@@ -3153,3 +3669,16 @@ def calculate_lot_yield(
         )
 
     return out
+
+
+# =============================================================================
+# LINN County L2/L3 — re-exported from linn_terra (separate module to dodge the
+# multi-parallel-session edit thrash on this file; functional contract identical
+# to every other county). End-of-file so `from .orb_db import fetch_linn_*`
+# keeps working.
+# =============================================================================
+from .linn_terra import (
+    fetch_linn_assessment,
+    fetch_linn_records,
+    fetch_linn_permits,
+)
