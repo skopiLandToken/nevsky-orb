@@ -166,6 +166,13 @@ def get_active_owners():
         return ["iosif@skopi.io"]
 
 def poll_imap():
+    # Email->Telegram bridge MUTED by Iosif's directive (2026-05-28): inbox forwarding into
+    # Telegram is off by default. Code path and IMAP_* config are left fully intact so the
+    # bridge can be re-enabled selectively later — set EMAIL_TG_BRIDGE_ENABLED=true in .env
+    # and restart nevsky-worker. See handoff_log/email_telegram_bridge_muted.md.
+    if os.getenv("EMAIL_TG_BRIDGE_ENABLED", "false").strip().lower() not in ("1", "true", "yes", "on"):
+        return
+
     host = os.getenv("IMAP_HOST", "")
     port = int(os.getenv("IMAP_PORT", 993))
     user = os.getenv("IMAP_USER", "")
