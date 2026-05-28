@@ -308,7 +308,9 @@ def _refresh_ks_telemetry(conn, message_id: str) -> None:
                      metadata, is_private, owner_user_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
                 """,
-                (title, content, "resend_webhook", "email_telemetry", "email_telemetry",
+                # content_type is a constrained taxonomy (knowledge_store_content_type_check);
+                # "email" is the allowed member. source_type carries the finer "email_telemetry".
+                (title, content, "resend_webhook", "email_telemetry", "email",
                  tags, json.dumps(summary), True, IOSIF_USER_ID),
             )
         conn.commit()
