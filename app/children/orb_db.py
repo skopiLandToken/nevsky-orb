@@ -1158,6 +1158,11 @@ _OREGON_EPERMITTING_FIPS = {
             #                smaller cities / unincorporated Linn ride the state portal as a
             #                deep-link-only landing (IN FLIGHT verification per jurisdiction).
     "047",  # Marion       — confirmed via the Marion County PublicWorksPermits GIS
+    "053",  # Polk         — Tier 2 Major. Per the Tier-2-rides-state-Accela pattern
+            #                (Clackamas confirmed Tier-1-flagships-run-county-direct,
+            #                Tier-2+ ride state). Polk jurisdictions (Dallas, Independence,
+            #                Monmouth, Falls City, Willamina, unincorporated) all route
+            #                through aca-oregon.accela.com /oregon — confirmed during recon.
             #                service (gis.co.marion.or.us/.../PublicWorksPermits) whose
             #                description states permits are "as entered in Accela"; the
             #                aca-oregon.accela.com /oregon module exposes Marion permits.
@@ -4092,4 +4097,17 @@ from .linn_terra import (
     fetch_linn_assessment,
     fetch_linn_records,
     fetch_linn_permits,
+)
+
+
+# =============================================================================
+# POLK County L2/L3 — re-exported from polk_terra (separate module, same precedent
+# as linn_terra above to avoid concurrent-edit thrash during Yindo parallel-session
+# expansions). Functional contract identical to every other county; callers keep
+# using `from .orb_db import fetch_polk_*` regardless of where the body lives.
+# =============================================================================
+from .polk_terra import (
+    fetch_polk_assessment,
+    fetch_polk_records,
+    fetch_polk_permits,
 )
