@@ -4290,7 +4290,7 @@ def _douglas_l1_row(taxlot: str):
     "19080000100"). Returns None if not found.
     """
     try:
-        with _conn() as cn, cn.cursor(row_factory=_psycopg.rows.dict_row) as cur:
+        with _conn() as cn, cn.cursor() as cur:
             cur.execute(
                 """
                 WITH hit AS (
