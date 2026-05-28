@@ -285,11 +285,29 @@ TIER_TOOLS["executive_readall"] = TIER_TOOLS["executive"] + [
 # Tiers whose knowledge_store reads are gated by confirm-on-private: is_private=true
 # entries are withheld from the model and an approval card fires to the founder via
 # Sophia before the content is ever released. DOCTRINE-ACCESS-TIER-READALL-01.
-# NOTE for a future session: the `executive` tier (Ophelia/Dan) currently has UNGATED
-# private read because no gate was ever built for it. Extending this set to "executive"
-# is the obvious follow-up, but is OUT OF SCOPE tonight (don't change Dan's bot behavior
-# without Iosif's instruction).
-CONFIRM_ON_PRIVATE_TIERS = {"executive_readall"}
+#   - executive_readall (Lilith / Jacob): gate ALL is_private rows. Tags ignored.
+#   - executive (Ophelia / Dan): gate is_private rows UNLESS explicitly opted-in via the
+#     `executive_readable` tag (see _is_exec_readable_exempt). Added 2026-05-28 per
+#     DOCTRINE-CLASSIFICATION-FAIL-CLOSED-01 (extends Ophelia/Dan to the gate).
+CONFIRM_ON_PRIVATE_TIERS = {"executive_readall", "executive"}
+
+# DOCTRINE-CLASSIFICATION-FAIL-CLOSED-01 (2026-05-28). The opt-in tag that exempts a
+# founder-private row from the confirm-on-private gate for the `executive` tier. Read
+# permission is an EXPLICIT author opt-in, NEVER inferred from owner_user_id — a row that
+# is ABOUT Dan (e.g. the $97K closing backstop) is still founder-private unless it carries
+# this tag. Subject != permission. Absence of the tag = gated (fail closed, not open).
+EXEC_READABLE_TAG = "executive_readable"
+
+
+def _is_exec_readable_exempt(tier: str, row: dict) -> bool:
+    """True if a founder-private `row` is cleared to read without an approval card.
+    Exemption applies ONLY to the `executive` tier (Ophelia/Dan) and ONLY when the row
+    carries the explicit EXEC_READABLE_TAG. executive_readall (Lilith) deliberately
+    ignores the tag and gates ALL private rows — its read-all gating is unchanged.
+    Fail closed: no tag => not exempt => gated. DOCTRINE-CLASSIFICATION-FAIL-CLOSED-01."""
+    if tier != "executive":
+        return False
+    return EXEC_READABLE_TAG in (row.get("tags") or [])
 
 # Tiers exempt from the (future) TERRA rate limiter — internal C-level executives.
 # DOCTRINE-SEAT-INTEGRITY-01 caps apply to SOLD external seats, NOT these tiers.
@@ -1209,20 +1227,23 @@ def _record_founder_private_request(child_canonical_name: str, requesting_telegr
 def _gate_private_kb(child: dict, tool_name: str, tool_input: dict, result, user_message: str):
     """Redact founder-private knowledge_store content for confirm-on-private tiers and
     enqueue an approval request on full-read. Non-private content passes through clean."""
-    if child.get("tier") not in CONFIRM_ON_PRIVATE_TIERS:
+    tier = child.get("tier")
+    if tier not in CONFIRM_ON_PRIVATE_TIERS:
         return result
     name = child.get("canonical_name", "")
     req_tid = str(child.get("bound_telegram_id") or "")
 
     if tool_name == "search_knowledge_store" and isinstance(result, list):
         for row in result:
-            if isinstance(row, dict) and row.get("is_private"):
+            if (isinstance(row, dict) and row.get("is_private")
+                    and not _is_exec_readable_exempt(tier, row)):
                 row["content_preview"] = _PRIVATE_LOCKED_NOTE
                 row["content_full_length"] = 0
                 row["_locked"] = True
         return result
 
-    if tool_name == "get_knowledge_entry_full" and isinstance(result, dict) and result.get("is_private"):
+    if (tool_name == "get_knowledge_entry_full" and isinstance(result, dict)
+            and result.get("is_private") and not _is_exec_readable_exempt(tier, result)):
         entry_id = str(result.get("id") or tool_input.get("entry_id") or "")
         title = result.get("title") or "(untitled founder-private entry)"
         _record_founder_private_request(name, req_tid, entry_id, title, user_message)

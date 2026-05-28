@@ -235,12 +235,31 @@ async def send_lilith_message_with_markup(chat_id: int, text: str, reply_markup:
 
 
 # === CONFIRM-ON-PRIVATE APPROVAL CARDS (DOCTRINE-ACCESS-TIER-READALL-01, 2026-05-28) ===
-# When a confirm-on-private child (Lilith/executive_readall) reaches for a founder-private
-# knowledge_store entry, child_engine withholds the content and appends a pending row to
+# When a confirm-on-private child reaches for a founder-private knowledge_store entry,
+# child_engine withholds the content and appends a pending row to
 # founder_private_access_requests. This fires a Sophia approval card to Iosif for each
 # un-carded pending request. Decoupled from the engine via the DB queue so child_engine
 # stays write-light (its only write is the append). Approve/Deny is handled in
-# process_telegram_callback_query (lilith_priv_approve / lilith_priv_deny).
+# process_telegram_callback_query (lilith_priv_approve / lilith_priv_deny — the callback
+# names are kept generic across children; delivery is routed by child_canonical_name).
+# Extended to the `executive` tier (Ophelia/Dan) 2026-05-28 per
+# DOCTRINE-CLASSIFICATION-FAIL-CLOSED-01.
+
+# Per-child labels for the founder-private card + release/deny messages. The card always
+# goes to Iosif (the founder); only the requester label and the delivery recipient differ.
+_CONFIRM_PRIVATE_CHILDREN = {
+    "lilith": {"label": "Lilith (Jacob Gale)", "recipient": "Jacob"},
+    "ophelia": {"label": "Ophelia (Dan Wikert)", "recipient": "Dan"},
+}
+
+
+def _confirm_private_meta(child_canonical_name: str) -> dict:
+    return _CONFIRM_PRIVATE_CHILDREN.get(
+        child_canonical_name,
+        {"label": child_canonical_name or "A child", "recipient": "the requester"},
+    )
+
+
 async def fire_pending_founder_private_cards(child_canonical_name: str = "lilith"):
     iosif_id = os.environ.get("IOSIF_TELEGRAM_ID", "7583693994")
     try:
@@ -265,14 +284,15 @@ async def fire_pending_founder_private_cards(child_canonical_name: str = "lilith
     def _md_safe(s):
         return "".join(" " if c in "_*`[" else c for c in str(s or ""))
 
+    meta = _confirm_private_meta(child_canonical_name)
     for row in rows:
         req_id, entry_title, question_context = row[0], row[1], row[2]
         text = (
             "🔐 *Founder-Private Access Request*\n\n"
-            f"*Lilith* (Jacob Gale) is requesting a founder-private item:\n"
+            f"*{_md_safe(meta['label'])}* is requesting a founder-private item:\n"
             f"📄 *{_md_safe(entry_title)}*\n\n"
-            + (f"_His question:_ {_md_safe(question_context)}\n\n" if question_context else "")
-            + "Approve → contents are released to Jacob via Lilith.\n"
+            + (f"_Their question:_ {_md_safe(question_context)}\n\n" if question_context else "")
+            + f"Approve → contents are released to {_md_safe(meta['recipient'])}.\n"
             "Deny → withheld. Nothing is deleted either way."
         )
         markup = {"inline_keyboard": [[
@@ -2098,6 +2118,11 @@ async def telegram_webhook(request: Request):
         except Exception as _engine_err:
             print(f"[unified_webhook ophelia] engine error: {_engine_err}")
             await send_ophelia_message(chat_id, "Ophelia hit an internal error. Iosif has been notified.")
+        # Confirm-on-private: fire any approval cards the engine queued this turn.
+        try:
+            await fire_pending_founder_private_cards("ophelia")
+        except Exception as _fp_err:
+            print(f"[unified_webhook ophelia] founder-private card fire error: {_fp_err}")
         return {"ok": True}
     # ── END OPHELIA ───────────────────────────────────────────────────
 
@@ -2880,7 +2905,8 @@ async def process_telegram_callback_query(callback_query: dict, response_bot_tok
             with get_db_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        """SELECT entry_id, entry_title, requesting_telegram_id, status
+                        """SELECT entry_id, entry_title, requesting_telegram_id, status,
+                                  child_canonical_name
                            FROM founder_private_access_requests WHERE id = %s""",
                         (req_id,),
                     )
@@ -2893,6 +2919,11 @@ async def process_telegram_callback_query(callback_query: dict, response_bot_tok
                 await answer_telegram_callback_query(callback_query_id, "Request not found.")
             return {"ok": False, "reason": "request_not_found"}
         entry_id, entry_title, requester_tid, status = row[0], row[1], row[2], row[3]
+        req_child = row[4] if len(row) > 4 else "lilith"
+        # Route the release/deny message back through the SAME child that asked, to its
+        # bound user (Lilith→Jacob, Ophelia→Dan). DOCTRINE-CLASSIFICATION-FAIL-CLOSED-01.
+        _send_to_requester = send_ophelia_message if req_child == "ophelia" else send_lilith_message
+        _recipient = _confirm_private_meta(req_child)["recipient"]
         if status != "pending":
             if callback_query_id:
                 await answer_telegram_callback_query(callback_query_id, f"Already {status}.")
@@ -2922,12 +2953,12 @@ async def process_telegram_callback_query(callback_query: dict, response_bot_tok
             if requester_tid and content:
                 msg = (f"🔓 *Approved by Iosif* — founder-private item released:\n\n"
                        f"*{entry_title}*\n\n{content}")
-                await send_lilith_message(int(requester_tid), msg[:3900])
+                await _send_to_requester(int(requester_tid), msg[:3900])
             elif requester_tid:
-                await send_lilith_message(int(requester_tid),
+                await _send_to_requester(int(requester_tid),
                     f"🔓 *{entry_title}* was approved, but I couldn't load its contents — tell Iosif to check the logs.")
             if callback_query_id:
-                await answer_telegram_callback_query(callback_query_id, "Approved ✅ — released to Jacob.")
+                await answer_telegram_callback_query(callback_query_id, f"Approved ✅ — released to {_recipient}.")
             return {"ok": True, "action": "approved", "request_id": str(req_id)}
 
         # deny
@@ -2943,7 +2974,7 @@ async def process_telegram_callback_query(callback_query: dict, response_bot_tok
         except Exception as _e:
             print(f"[lilith_priv_deny] update error: {_e}")
         if requester_tid:
-            await send_lilith_message(int(requester_tid),
+            await _send_to_requester(int(requester_tid),
                 f"🚫 That item (*{entry_title}*) is founder-private and access wasn't granted right now. Happy to pull anything else.")
         if callback_query_id:
             await answer_telegram_callback_query(callback_query_id, "Denied 🚫 — withheld.")
@@ -4309,6 +4340,11 @@ async def ophelia_webhook(request: Request):
         except Exception as _engine_err:
             print(f"[ophelia_webhook] engine error: {_engine_err}")
             await send_ophelia_message(chat_id, "Ophelia hit an internal error. Iosif has been notified.")
+        # Confirm-on-private: fire any approval cards the engine queued this turn.
+        try:
+            await fire_pending_founder_private_cards("ophelia")
+        except Exception as _fp_err:
+            print(f"[ophelia_webhook] founder-private card fire error: {_fp_err}")
     return {"ok": True}
     # === END ENGINE ROUTING (ophelia) ===
 
