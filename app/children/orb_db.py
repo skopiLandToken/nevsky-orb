@@ -797,6 +797,44 @@ COUNTY_REGISTRY = {
             LIMIT 1
         """,
     },
+    "057": {  # Tillamook (FIPS 41-057) — Tier 3 Standard, north coast (Pacific City / Rockaway / Manzanita) + dairy belt
+        "name": "Tillamook",
+        # bbox: north-coast county — Manzanita/Nehalem N, Neskowin/Pacific City S,
+        # Pacific W, Coast-Range crest E. Measured extent (45.04, 45.78, -124.02,
+        # -123.30); padded. North edge overlaps Clatsop's south bbox — harmless,
+        # ST_Contains on actual geometry decides (first-hit wins on real polygon).
+        "bbox": (45.00, 45.85, -124.10, -123.20),
+        # Tillamook's hosted Taxlot Owners feed ships the Yamhill/ODF family schema
+        # PLUS live valuation (ASSESSVAL/LANDVALUE/IMPVALUE). Owner stack inline
+        # (OWNERLINE1/2/3). Zoning NOT in source (Jackson-pattern follow-up).
+        # Acreage: COALESCE(taxlot_acres, geodesic).
+        "query": """
+            SELECT taxlot,
+                   map_number AS section_id,
+                   ROUND(COALESCE(taxlot_acres, map_acres, (ST_Area(geom::geography) / 4046.8564224))::numeric, 3) AS acres,
+                   'https://www.tillamookcounty.gov/' AS county_url,
+                   map_number,
+                   COALESCE(
+                       NULLIF(CONCAT_WS(' & ',
+                                        NULLIF(owner_line1, ''),
+                                        NULLIF(owner_line2, ''),
+                                        NULLIF(owner_line3, '')), ''),
+                       owner_line1
+                   ) AS owner_name,
+                   CASE
+                       WHEN site_add_nam IS NULL OR site_add_nam = '' THEN NULL
+                       ELSE RTRIM(site_add_nam, ', ') || COALESCE(', ' || NULLIF(site_add_cty, ''), '')
+                   END AS situs_address,
+                   NULL::text AS zone_code,
+                   NULL::text AS zone_label,
+                   ST_AsText(ST_Centroid(geom)) AS parcel_centroid,
+                   'Tillamook'::text AS county_name,
+                   '057'::text AS county_fips
+            FROM parcels_tillamook
+            WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            LIMIT 1
+        """,
+    },
     # Jefferson (031) lands here when its L1 table exists.
 }
 
@@ -1336,6 +1374,10 @@ def fetch_crook_assessment(taxlot: str, force_refresh: bool = False) -> dict:
 # fetch_county_permits — counties NOT in this set get a structured response
 # saying the state portal won't have their permits, look elsewhere.
 _OREGON_EPERMITTING_FIPS = {
+    "057",  # Tillamook    — Tier 3 Standard coastal. All jurisdictions (Tillamook /
+            #                Garibaldi / Bay City / Rockaway Beach / Manzanita /
+            #                Nehalem / Wheeler / Pacific City / unincorporated) ride
+            #                state Accela; no county-direct portal found.
     "007",  # Clatsop      — Tier 3 Standard coastal. All jurisdictions (Astoria /
             #                Seaside / Cannon Beach / Gearhart / Warrenton /
             #                unincorporated) ride state Accela; no county-direct
@@ -4617,4 +4659,16 @@ from .clatsop_terra import (  # noqa: E402
     fetch_clatsop_assessment,
     fetch_clatsop_records,
     fetch_clatsop_permits,
+)
+
+
+# =============================================================================
+# TILLAMOOK County L2/L3 (FIPS 057) — Tier 3 Standard, coastal cluster — re-exported
+# from tillamook_terra (separate module, same precedent). Ships valuation LIVE.
+# Callers keep using `from .orb_db import fetch_tillamook_*`.
+# =============================================================================
+from .tillamook_terra import (  # noqa: E402
+    fetch_tillamook_assessment,
+    fetch_tillamook_records,
+    fetch_tillamook_permits,
 )

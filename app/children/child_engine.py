@@ -78,6 +78,9 @@ from .orb_db import (
     fetch_clatsop_assessment,
     fetch_clatsop_records,
     fetch_clatsop_permits,
+    fetch_tillamook_assessment,
+    fetch_tillamook_records,
+    fetch_tillamook_permits,
     query_yakov_handoffs,
     query_yakov_commits,
     calculate_lot_yield,
@@ -156,6 +159,9 @@ TIER_TOOLS = {
         "fetch_clatsop_assessment",
         "fetch_clatsop_records",
         "fetch_clatsop_permits",
+        "fetch_tillamook_assessment",
+        "fetch_tillamook_records",
+        "fetch_tillamook_permits",
         "query_yakov_handoffs",
         "query_yakov_commits",
         "calculate_lot_yield",
@@ -214,6 +220,9 @@ TIER_TOOLS = {
         "fetch_clatsop_assessment",
         "fetch_clatsop_records",
         "fetch_clatsop_permits",
+        "fetch_tillamook_assessment",
+        "fetch_tillamook_records",
+        "fetch_tillamook_permits",
         "calculate_lot_yield",
         "web_search",
     ],
@@ -801,6 +810,36 @@ ALL_TOOL_SCHEMAS = {
             "required": ["taxlot"]
         }
     },
+    "fetch_tillamook_assessment": {
+        "name": "fetch_tillamook_assessment",
+        "description": "TERRA: Fetch the Tillamook County assessment + ownership + VALUATION snapshot for a taxlot (Tillamook / Garibaldi / Bay City / Rockaway Beach / Manzanita / Nehalem / Wheeler / Pacific City / unincorporated — Oregon's north coast: beach tourism + STR layered over the dairy belt). Use when the user asks about a Tillamook parcel. Source is a hosted ArcGIS Online Taxlot Owners feed, pure SQL pass-through over parcels_tillamook L1 inline — NO scraper, NO viewstate gating, NO HTTP per call. RICHEST ODF-family L2 in TERRA because VALUATION SHIPS INLINE AND LIVE: ASSESSVAL (assessed total, 90% populated) + LANDVALUE + IMPVALUE — surface assessed_total as the headline number (contrast Yamhill / Jefferson which ship no valuation). Also ships: owner stack (OWNERLINE1/2/3, 95%), full mailing block, situs (SITEADDNAM + SITEADDCTY, 63%), account + tax status (PRIMACCNUM / ACCTSTATUS / TAXSTATUS), property class (PRPCLASS / PRPCLSDSC), PLSS-derived section, acreage (TaxlotAcre + MapAcres + geodesic), most-recent recording snapshot (INSTID / INSTTYPE / INSTYEAR / INSTMONTH). IN FLIGHT — flag honestly, never invent: RMV (feed ships ASSESSED + land + improvement, not a distinct real-market figure); building details (year built / sqft / bed / bath not in source); zoning (no Tillamook zoning service ingested yet — Jackson-pattern follow-up; PRPCLSDSC carries use class); per-parcel assessor deep link (county site WAF-blocks datacenter IPs). FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (👤 OWNER / 🏠 SITUS / 🧾 ACCOUNT / 💰 VALUATION / 🌍 ACREAGE / 📜 RECORDING / 🔗 DEEP LINKS). Surface 💰 VALUATION prominently — Tillamook is the coastal county where assessed value is LIVE. End with the taxlot_rest deep link as broker hand-off. Never apologize, never fabricate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Tillamook ORTaxlot (29-char, e.g. '2901.00S09.00W30BC--000004300') or MapTaxlot or PRIMACCNUM."},
+                "force_refresh": {"type": "boolean", "default": False, "description": "No-op — Tillamook L2 is a SQL pass-through over L1 inline; freshness comes from the L1 delta refresh."}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_tillamook_records": {
+        "name": "fetch_tillamook_records",
+        "description": "TERRA: Fetch the Tillamook County recorded-document snapshot for a taxlot. Use when the user asks about deeds, the recent transfer, or current ownership of a Tillamook parcel. Returns the MOST-RECENT instrument-of-record (INSTID / INSTTYPE / INSTYEAR / INSTMONTH → synthesized ISO date; source ships no day, no sale price) and the current owners of record (up to 3 lines + mailing) from parcels_tillamook L1 inline, plus deep links. IN FLIGHT — flag honestly: multi-instrument deed chain (only the latest is inline; County Clerk recording surface is WAF-blocked from the droplet — broker navigates from the county home to County Clerk Records); recorded sale price (not in source). FORMATTING: TERRA aesthetic. 📜 emoji header. Lead with latest_instrument, then owners_of_record, then the deep link. Frame the IN FLIGHT as 'full chain is one navigation from County Clerk Records' — never apologize, never fabricate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_tillamook_permits": {
+        "name": "fetch_tillamook_permits",
+        "description": "TERRA: Fetch building permits for a Tillamook County parcel via Oregon's state ePermitting portal (Accela ACA). One-line wrapper around fetch_county_permits('057') — Tillamook is Tier 3 Standard. Per the established pattern (Tier 1 Flagships run county-direct Accela tenants, Tier 2/3/4 ride state Accela), all Tillamook jurisdictions — Tillamook (city), Garibaldi, Bay City, Rockaway Beach, Manzanita, Nehalem, Wheeler, Pacific City, and unincorporated — route through aca-oregon.accela.com/oregon. No dedicated Tillamook permits GIS FeatureServer exists, so the state-Accela deep link is the canonical surface. IN FLIGHT — same deep-link-only pattern as every other state-Accela county (scrape gated on viewstate capture / Playwright). FORMATTING: TERRA aesthetic. 🚧 emoji header. Surface jurisdiction ('Tillamook County — Oregon state Accela; Tier 3 reuse pattern') and the accela_search deep link as 'one tap from the live state portal.'",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
     "fetch_clatsop_assessment": {
         "name": "fetch_clatsop_assessment",
         "description": "TERRA: Fetch the Clatsop County assessment + ownership + situs snapshot for a taxlot (Astoria / Seaside / Cannon Beach / Gearhart / Warrenton / unincorporated — Oregon's NW-corner coast, tourism + STR market). Use when the user asks about a Clatsop parcel. Source is Clatsop County's OWN Taxlots FeatureServer (not the ODF overlay), pure SQL pass-through over parcels_clatsop L1 inline — NO scraper, NO viewstate gating, NO HTTP per call. Ships: owner (up to 3 lines OWNER_LINE/OWNER_LL_1/OWNER_LL_2 + IN_CARE_OF, 99.8% populated), full mailing block, situs (SITUS_ADDR + SITUS_CITY, 68%), account (ACCOUNT_ID, 99.9%), property class (PROPERTY_C + STAT_CLASS), YEAR_BUILT (67%), tax code, maintenance-area / neighborhood, septic status, and geodesic acreage. IN FLIGHT — flag honestly, never invent: VALUATION (no assessed/RMV in the public layer — token-gated Assessment_Tax folder; broker pulls from Public Property Search via account_id); ZONING (not on the taxlot record — separate Zoning_Layers MapServer with county + Astoria/Cannon Beach/Gearhart/Seaside/Warrenton layers, ingest queued Jackson-pattern); recorded sale / chain of title (no instrument fields — see fetch_clatsop_records); building detail beyond year built. FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (👤 OWNER / 🏠 SITUS / 🧾 ACCOUNT / 🏗️ BUILDING / 🌍 ACREAGE / 🔗 DEEP LINKS). Surface owner stack + situs + year_built prominently. For the coastal STR audience, surface the transient_room_tax deep link. End with public_property_search as the broker hand-off. Never apologize, never fabricate.",
@@ -937,6 +976,9 @@ LOCAL_TOOL_FUNCTIONS = {
     "fetch_clatsop_assessment": fetch_clatsop_assessment,
     "fetch_clatsop_records": fetch_clatsop_records,
     "fetch_clatsop_permits": fetch_clatsop_permits,
+    "fetch_tillamook_assessment": fetch_tillamook_assessment,
+    "fetch_tillamook_records": fetch_tillamook_records,
+    "fetch_tillamook_permits": fetch_tillamook_permits,
     "get_site_plans": get_site_plans,
     "get_ai_spend_today": get_ai_spend_today,
     "query_yakov_handoffs": query_yakov_handoffs,
