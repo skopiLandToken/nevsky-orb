@@ -63,6 +63,9 @@ from .orb_db import (
     fetch_benton_assessment,
     fetch_benton_records,
     fetch_benton_permits,
+    fetch_polk_assessment,
+    fetch_polk_records,
+    fetch_polk_permits,
     query_yakov_handoffs,
     query_yakov_commits,
     calculate_lot_yield,
@@ -126,6 +129,9 @@ TIER_TOOLS = {
         "fetch_benton_assessment",
         "fetch_benton_records",
         "fetch_benton_permits",
+        "fetch_polk_assessment",
+        "fetch_polk_records",
+        "fetch_polk_permits",
         "query_yakov_handoffs",
         "query_yakov_commits",
         "calculate_lot_yield",
@@ -169,6 +175,9 @@ TIER_TOOLS = {
         "fetch_benton_assessment",
         "fetch_benton_records",
         "fetch_benton_permits",
+        "fetch_polk_assessment",
+        "fetch_polk_records",
+        "fetch_polk_permits",
         "calculate_lot_yield",
         "web_search",
     ],
@@ -645,6 +654,36 @@ ALL_TOOL_SCHEMAS = {
             "required": ["taxlot"]
         }
     },
+    "fetch_polk_assessment": {
+        "name": "fetch_polk_assessment",
+        "description": "TERRA: Fetch the Polk County assessment + ownership snapshot for a taxlot (Dallas / Independence / Monmouth / Falls City / Willamina / West Salem-adjacent / unincorporated Polk). Use when the user asks about a parcel in west Willamette Valley around Salem's west bank, the Polk side of the Salem metro, or the Coast-Range-east hill country. Polk's public taxlot service is MARION-RICH: source ships joined parcel + AcctTable attrs in ONE row — owner_line1, agent_name, in_care_of, full mailing block (addr1/2/city/state/zip/country), situs (street + city + zip), account_id + prim_acc_num, last instrument (id / type / year / month — source ships no day, no recorded sale price), property class + description, dwelling flag, assessed values (land / improvement / total — source ships NO RMV-family valuation, only assessed), tax routing (SA / MA / NH / TaxCode / TaxCodeArea / Unit_ID), acreage (polygon native + account-of-record + sqft). NO scraper, NO viewstate gating, NO HTTP per call — pure SQL pass-through over parcels_polk. IN FLIGHT — flag honestly, do not invent: real-market valuation (Polk MapServer exposes only assessed); building details (year built / sqft / bed / bath — not exposed); zoning (separate Polk MapServer not yet ingested); Polk's www.polkcountyor.gov direct portal subpages return 404 — only maps.co.polk.or.us/pcmaps + the PSO Property Search Online portal are reachable for human follow-up. FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (👤 OWNER / 🏠 SITUS / 🧾 ACCOUNT / 💰 VALUATION / 🌍 ACREAGE / 🔗 DEEP LINKS). Surface assessed_total prominently in 💰 VALUATION; explicitly note RMV is not in source. End with the pso_search + polk_maps deep links as broker hand-off.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Polk ORTaxlot (29-char canonical OR format, e.g. '2707.00S05.00W33BC--000006300' for the Polk County Courthouse) or MapTaxlot."},
+                "force_refresh": {"type": "boolean", "default": False, "description": "Currently no-op — Polk L2 is a SQL pass-through over L1 inline; freshness comes from the daily L1 delta refresh."}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_polk_records": {
+        "name": "fetch_polk_records",
+        "description": "TERRA: Fetch the Polk County deed / recorded-instrument snapshot for a taxlot. Use when the user asks about deeds, recent transfer, recorded documents, or 'what was the last instrument on this Polk parcel'. Returns the MOST-RECENT instrument-of-record (instrument_id, type, year, month — source ships no day, synthesizes an ISO date as YYYY-MM-01; source ships NO recorded sale price), the current owner of record (primary + agent + in_care_of + full mailing block), plus deep links to the Polk Clerk Digital Research Room and the maps portal. IN FLIGHT — flag honestly: multi-instrument deed chain (only the latest instrument is in our L1 snapshot; full chain lives in the Polk Clerk Digital Research Room 1984-present index, one tap from the deep link); recorded sale price (Polk MapServer exposes neither the sale price nor the day-of-month — relationshipId 0 to PCMAPS.DBO.V_REAL_SALES carries the price chain, queryable on demand but queued as follow-up). FORMATTING: TERRA aesthetic. 📜 emoji header. Lead with latest_instrument (instrument_id / type / year-month), then owner_of_record, then the digital_research_room deep link. Frame the IN FLIGHT as 'full chain of title is one tap from the Clerk's Digital Research Room' — never apologize, never fabricate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_polk_permits": {
+        "name": "fetch_polk_permits",
+        "description": "TERRA: Fetch building permits for a Polk County parcel via Oregon's state ePermitting portal (Accela ACA). One-line wrapper around fetch_county_permits('053') — Polk is Tier 2 Major. Per the emerging pattern Clackamas confirmed (Tier 1 Flagships run county-direct Accela tenants, Tier 2/3/4 ride state Accela), Polk jurisdictions — Dallas, Independence, Monmouth, Falls City, Willamina, and unincorporated Polk — all route through aca-oregon.accela.com/oregon. Brief reuse hypothesis VALIDATED — clean fetch_county_permits wrapper, not a county-direct Accela. IN FLIGHT — same deep-link-only pattern as Crook/Marion/Benton: scrape gated on viewstate capture / Playwright. FORMATTING: TERRA aesthetic. 🚧 emoji header. Surface jurisdiction ('Polk County — Oregon state Accela; Tier 2 reuse pattern'). Frame the deep link as 'one tap from the live state portal.'",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
     "calculate_lot_yield": {
         "name": "calculate_lot_yield",
         "description": "TERRA — SPECULATIVE residential lot-yield analysis. Verify with planning office before quoting. Computes a rough estimate of how many residential lots could theoretically be carved from a Deschutes County parcel and (optionally) the gross retail value if the broker provides a per-lot market estimate. CALL when a broker asks 'how many lots can I get on parcel X', 'what's parcel X worth as a development', 'what's the yield on this taxlot', or after a TERRA SCAN COMPLETE on a residential parcel ≥1.0 acre. INPUTS: parcel_id (taxlot string, required). Optional: deduction_override (0-1 fraction for roads/utilities/setbacks; default 0.25 = 25%), per_lot_value_override (USD per finished lot — broker's own market number; if omitted, the tool returns a yield-only result and prompts the broker for their estimate), target_zone_override (force a different zone for what-if rezone scenarios). BEHAVIOR: (a) if the parcel has no zoning on file, the tool live-queries the county GIS service and caches the result — adds ~500ms latency but completes the call. (b) Non-residential zones return an informational dict (not an error) noting yield-calc doesn't apply. (c) Zones outside the seed lookup return a structured error with guidance — NO fake numbers. (d) Every result carries a footer disclaimer: 'TERRA estimate — actual yield subject to site conditions, plat approval, and jurisdictional review. Verify with the city/county planning office before underwriting.' DOCTRINE: per DOCTRINE-TERRA-ANALYSIS-TOOL-01, this tool is speculative analysis only — never quote outputs as certified yield or appraised value. Per DOCTRINE-YIELD-HOOK-THEN-CLOSE-01, the v1 output is the broker hook; v2 'deep dive' refinement (setbacks, slope, wetlands) comes later. FORMATTING for Sophia's reply: render the result as a TERRA card with the broker-friendly numbers up front (lot_yield, gross_retail if available), then assumptions, then the footer. NEVER omit the footer.",
@@ -727,6 +766,9 @@ LOCAL_TOOL_FUNCTIONS = {
     "fetch_benton_assessment": fetch_benton_assessment,
     "fetch_benton_records": fetch_benton_records,
     "fetch_benton_permits": fetch_benton_permits,
+    "fetch_polk_assessment": fetch_polk_assessment,
+    "fetch_polk_records": fetch_polk_records,
+    "fetch_polk_permits": fetch_polk_permits,
     "get_site_plans": get_site_plans,
     "get_ai_spend_today": get_ai_spend_today,
     "query_yakov_handoffs": query_yakov_handoffs,
