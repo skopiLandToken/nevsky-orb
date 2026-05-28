@@ -60,6 +60,9 @@ from .orb_db import (
     fetch_linn_assessment,
     fetch_linn_records,
     fetch_linn_permits,
+    fetch_benton_assessment,
+    fetch_benton_records,
+    fetch_benton_permits,
     query_yakov_handoffs,
     query_yakov_commits,
     calculate_lot_yield,
@@ -120,6 +123,9 @@ TIER_TOOLS = {
         "fetch_linn_assessment",
         "fetch_linn_records",
         "fetch_linn_permits",
+        "fetch_benton_assessment",
+        "fetch_benton_records",
+        "fetch_benton_permits",
         "query_yakov_handoffs",
         "query_yakov_commits",
         "calculate_lot_yield",
@@ -160,6 +166,9 @@ TIER_TOOLS = {
         "fetch_linn_assessment",
         "fetch_linn_records",
         "fetch_linn_permits",
+        "fetch_benton_assessment",
+        "fetch_benton_records",
+        "fetch_benton_permits",
         "calculate_lot_yield",
         "web_search",
     ],
@@ -606,6 +615,36 @@ ALL_TOOL_SCHEMAS = {
             "required": ["taxlot"]
         }
     },
+    "fetch_benton_assessment": {
+        "name": "fetch_benton_assessment",
+        "description": "TERRA: Fetch the Benton County assessment + property snapshot for a taxlot. Use when the user asks about a parcel in Corvallis / Philomath / Adair Village / Monroe / unincorporated Benton — anywhere in the Willamette Valley west of the river around Oregon State University. Returns aggregated owner_name (Benton's L1 is owner-exploded; STRING_AGG returns ALL co-trustees / co-owners), situs address, mailing address, account number, MapTaxlot + ORTaxlot, tax_code_area, map_number, computed acres (geodesic — Benton ships no native acres field), and verified deep links to the assessment portal. IN FLIGHT — per-parcel deep link (bcaps WordPress form is POST-only); RMV/AV/sales (behind assessment portal); zoning (separate Benton ZoningService FeatureServer). FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (👤 OWNER / 🏠 SITUS / 📬 MAILING / 🌍 SIZE / 📍 LOCATION / 🔗 DEEP LINKS).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Benton ORTaxlot (29-char canonical OR format, e.g. '0211.00S05.00W3400--000000100')."},
+                "force_refresh": {"type": "boolean", "default": False}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_benton_records": {
+        "name": "fetch_benton_records",
+        "description": "TERRA: Fetch Benton County recorded documents for a taxlot. IN FLIGHT — Benton's recording portal at records.co.benton.or.us/Recording/ is session-token gated (no public GET deep-link). Returns current owner_name (aggregated via STRING_AGG over parcels_benton) + verified deep links to the recordings portal and Records & Elections landing. Open paths: session capture + scrape / paid Tyler integration / per-doc Clerk export. FORMATTING: TERRA aesthetic. 📜 emoji header. Frame the IN FLIGHT honestly. End with recordings_portal link.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_benton_permits": {
+        "name": "fetch_benton_permits",
+        "description": "TERRA: Fetch building permits for a Benton County parcel via Oregon's state ePermitting portal (Accela ACA). One-line wrapper around fetch_county_permits('003') — Benton participates in the SAME state Accela as Crook/Marion/Lane, confirmed via cd.bentoncountyor.gov/electronic-permitting linking to aca-oregon.accela.com/oregon. Brief reuse hypothesis VALIDATED — clean fetch_county_permits wrapper, not a county-direct Accela. IN FLIGHT — same deep-link-only pattern: scrape gated on viewstate-capture / Playwright. FORMATTING: TERRA aesthetic. 🚧 emoji header. Frame the deep link as 'one tap from the live state portal.'",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
     "calculate_lot_yield": {
         "name": "calculate_lot_yield",
         "description": "TERRA — SPECULATIVE residential lot-yield analysis. Verify with planning office before quoting. Computes a rough estimate of how many residential lots could theoretically be carved from a Deschutes County parcel and (optionally) the gross retail value if the broker provides a per-lot market estimate. CALL when a broker asks 'how many lots can I get on parcel X', 'what's parcel X worth as a development', 'what's the yield on this taxlot', or after a TERRA SCAN COMPLETE on a residential parcel ≥1.0 acre. INPUTS: parcel_id (taxlot string, required). Optional: deduction_override (0-1 fraction for roads/utilities/setbacks; default 0.25 = 25%), per_lot_value_override (USD per finished lot — broker's own market number; if omitted, the tool returns a yield-only result and prompts the broker for their estimate), target_zone_override (force a different zone for what-if rezone scenarios). BEHAVIOR: (a) if the parcel has no zoning on file, the tool live-queries the county GIS service and caches the result — adds ~500ms latency but completes the call. (b) Non-residential zones return an informational dict (not an error) noting yield-calc doesn't apply. (c) Zones outside the seed lookup return a structured error with guidance — NO fake numbers. (d) Every result carries a footer disclaimer: 'TERRA estimate — actual yield subject to site conditions, plat approval, and jurisdictional review. Verify with the city/county planning office before underwriting.' DOCTRINE: per DOCTRINE-TERRA-ANALYSIS-TOOL-01, this tool is speculative analysis only — never quote outputs as certified yield or appraised value. Per DOCTRINE-YIELD-HOOK-THEN-CLOSE-01, the v1 output is the broker hook; v2 'deep dive' refinement (setbacks, slope, wetlands) comes later. FORMATTING for Sophia's reply: render the result as a TERRA card with the broker-friendly numbers up front (lot_yield, gross_retail if available), then assumptions, then the footer. NEVER omit the footer.",
@@ -685,6 +724,9 @@ LOCAL_TOOL_FUNCTIONS = {
     "fetch_linn_assessment": fetch_linn_assessment,
     "fetch_linn_records": fetch_linn_records,
     "fetch_linn_permits": fetch_linn_permits,
+    "fetch_benton_assessment": fetch_benton_assessment,
+    "fetch_benton_records": fetch_benton_records,
+    "fetch_benton_permits": fetch_benton_permits,
     "get_site_plans": get_site_plans,
     "get_ai_spend_today": get_ai_spend_today,
     "query_yakov_handoffs": query_yakov_handoffs,
