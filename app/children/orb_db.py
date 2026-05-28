@@ -4228,6 +4228,20 @@ from .polk_terra import (
 
 
 # =============================================================================
+# YAMHILL County L2/L3 — re-exported from yamhill_terra (separate module precedent,
+# same as linn_terra / polk_terra / josephine_terra; keeps the body out of the
+# shared orb_db.py so concurrent Yindo edits don't race). Rescue add — sibling
+# session shipped child_engine imports + tier entries expecting this re-export
+# but the line never landed; this restores the import chain.
+# =============================================================================
+from .yamhill_terra import (
+    fetch_yamhill_assessment,
+    fetch_yamhill_records,
+    fetch_yamhill_permits,
+)
+
+
+# =============================================================================
 # JOSEPHINE County L2/L3 — re-exported from josephine_terra (separate module,
 # same precedent as linn_terra / polk_terra to avoid concurrent-edit thrash on
 # this file during Yindo parallel-session expansions). Functional contract
