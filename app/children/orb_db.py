@@ -714,6 +714,50 @@ COUNTY_REGISTRY = {
             ) z ON true
         """,
     },
+    "071": {  # Yamhill (FIPS 41-071) — Tier 2 Major, Willamette Valley wine country
+        "name": "Yamhill",
+        # bbox: McMinnville + Newberg + Dundee + Carlton + Lafayette + Dayton +
+        # Sheridan + Willamina + Yamhill + Amity + unincorporated. County extent
+        # measured at ingest: (45.07, 45.43, -123.79, -122.85) — padded so
+        # Coast-Range-edge parcels and Newberg-east parcels (Washington-county
+        # boundary) don't fall through.
+        "bbox": (45.00, 45.50, -123.85, -122.75),
+        # Yamhill's Landowners service ships ORMAP polygon attrs joined to
+        # assessor account attrs in one row (Polk pattern). Owner data is
+        # richer — OWNERLINE1/2/3 — so single-row lookup returns the
+        # multi-trustee / family-LLC owner stack inline. Zoning is NOT in
+        # source (PRPCLASS / PRPCLSDSC schema-present, empty 100%); zone_label
+        # falls back to NULL until a Yamhill zoning service is located and
+        # ingested (Jackson-pattern follow-up). PRP class lacking in source =
+        # vineyard / EFU detection surfaces via owner_line1 wine-LLC keyword
+        # scan + situs_city (AMITY / DUNDEE / DAYTON in the Dundee Hills AVA).
+        "query": """
+            SELECT taxlot,
+                   map_number AS section_id,
+                   ROUND(COALESCE(taxlot_acres, (ST_Area(geom::geography) / 4046.8564224))::numeric, 3) AS acres,
+                   'https://www.yamhillcounty.gov/assessor' AS county_url,
+                   map_number,
+                   COALESCE(
+                       NULLIF(CONCAT_WS(' & ',
+                                        NULLIF(owner_line1, ''),
+                                        NULLIF(owner_line2, ''),
+                                        NULLIF(owner_line3, '')), ''),
+                       owner_line1
+                   ) AS owner_name,
+                   CASE
+                       WHEN site_add_nam IS NULL OR site_add_nam = '' THEN NULL
+                       ELSE RTRIM(site_add_nam, ', ') || COALESCE(', ' || NULLIF(site_add_cty, ''), '')
+                   END AS situs_address,
+                   NULL::text AS zone_code,
+                   NULL::text AS zone_label,
+                   ST_AsText(ST_Centroid(geom)) AS parcel_centroid,
+                   'Yamhill'::text AS county_name,
+                   '071'::text AS county_fips
+            FROM parcels_yamhill
+            WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            LIMIT 1
+        """,
+    },
     # Jefferson (031) lands here when its L1 table exists.
 }
 
@@ -1280,6 +1324,12 @@ _OREGON_EPERMITTING_FIPS = {
     "019",  # Douglas      — confirmed via state Accela GlobalSearch hitting Roseburg / Sutherlin /
             #                Winston / Myrtle Creek / Canyonville jurisdictions. Tier 2 reuse pattern
             #                (clean fetch_county_permits wrapper, not a county-direct Accela).
+    "071",  # Yamhill      — Tier 2 Major. Per emerging pattern (Tier 1 = county-direct
+            #                Accela tenants; Tier 2/3/4 = state Accela), Yamhill
+            #                jurisdictions default-route through aca-oregon.accela.com
+            #                /oregon. McMinnville + Newberg city-portal split IN FLIGHT
+            #                (recon hit 403/404 — fetch_yamhill_permits annotates the
+            #                deep-link result with that follow-up so it surfaces honestly).
     # Deschutes (017) does NOT participate — uses DIAL natively. Multnomah (051)
     # has its own permit system (Portland Maps for COP parcels). Add new FIPS
     # codes here only after confirming via the BCD jurisdiction lookup.
