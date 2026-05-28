@@ -523,6 +523,48 @@ COUNTY_REGISTRY = {
             LIMIT 1
         """,
     },
+    "003": {  # Benton (FIPS 41-003) — Tier 2 Major, Corvallis / Oregon State University
+        "name": "Benton",
+        # bbox: Benton spans the Coast Range east shoulder (Marys Peak) through
+        # the western Willamette Valley to the river — Corvallis + Philomath +
+        # Adair Village + Monroe + unincorporated. Padded slightly.
+        "bbox": (44.20, 44.80, -123.85, -122.95),
+        # Benton's TaxlotOwners service is owner-exploded — same polygon repeats
+        # 1..N times once per Party_Name (e.g., trust co-trustees yield 2-3 rows
+        # with identical Account_Num + ORTaxlot + geom). The CTE picks one row
+        # via ST_Contains/LIMIT 1; the owner_name subquery re-aggregates all
+        # Party_Name values for that ORTaxlot so a multi-trustee parcel shows
+        # all of them. Source ships no native acres/zoning — acres computed
+        # geodesically; zoning left NULL until L2 zoning fetcher lands.
+        "query": """
+            WITH hit AS (
+                SELECT geom, ortaxlot, maptaxlot, account_num,
+                       situs_addr1, situs_city, map_number
+                FROM parcels_benton
+                WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+                LIMIT 1
+            )
+            SELECT h.ortaxlot AS taxlot,
+                   h.map_number AS section_id,
+                   ROUND((ST_Area(h.geom::geography) / 4046.8564224)::numeric, 3) AS acres,
+                   'https://assessment.bentoncountyor.gov/property-account-search/' AS county_url,
+                   h.map_number,
+                   (SELECT STRING_AGG(DISTINCT party_name, '; ' ORDER BY party_name)
+                      FROM parcels_benton b
+                      WHERE b.ortaxlot = h.ortaxlot
+                        AND b.party_name IS NOT NULL) AS owner_name,
+                   CASE
+                       WHEN h.situs_addr1 IS NULL OR h.situs_addr1 = 'UNASSIGNED' THEN NULL
+                       ELSE h.situs_addr1 || COALESCE(', ' || h.situs_city, '')
+                   END AS situs_address,
+                   NULL::text AS zone_code,
+                   NULL::text AS zone_label,
+                   ST_AsText(ST_Centroid(h.geom)) AS parcel_centroid,
+                   'Benton'::text AS county_name,
+                   '003'::text AS county_fips
+            FROM hit h
+        """,
+    },
     # Jefferson (031) lands here when its L1 table exists.
 }
 
@@ -1062,6 +1104,8 @@ def fetch_crook_assessment(taxlot: str, force_refresh: bool = False) -> dict:
 # fetch_county_permits — counties NOT in this set get a structured response
 # saying the state portal won't have their permits, look elsewhere.
 _OREGON_EPERMITTING_FIPS = {
+    "003",  # Benton       — confirmed via cd.bentoncountyor.gov/electronic-permitting
+            #                links directly to aca-oregon.accela.com/oregon as the county e-permitting surface.
     "013",  # Crook        — confirmed via co.crook.or.us/commdev FAQ
     "031",  # Jefferson    — historically participates; verify per-build
     "039",  # Lane         — partial; participates for some jurisdictions
@@ -3676,6 +3720,330 @@ def calculate_lot_yield(
 # multi-parallel-session edit thrash on this file; functional contract identical
 # to every other county). End-of-file so `from .orb_db import fetch_linn_*`
 # keeps working.
+# =============================================================================
+from .linn_terra import (
+    fetch_linn_assessment,
+    fetch_linn_records,
+    fetch_linn_permits,
+)
+
+
+# =============================================================================
+# BENTON Layer 2 + Layer 3 Fetchers (s1 Yindo session — 2026-05-27, post-Marion)
+# =============================================================================
+# Reality check (2026-05-27, s1 Yindo session — Benton after Marion ship):
+# Benton's TaxlotOwners FeatureServer ships situs + owner + mailing inline,
+# but is OWNER-EXPLODED — same parcel polygon repeats 1..N times with one row
+# per Party_Name. 107,988 raw rows compress to 35,365 unique parcels (~2.86
+# rows/parcel avg; trust co-trustees and multi-owner deeds are the main drivers).
+# Owner aggregation happens at query time via STRING_AGG(Party_Name) GROUP BY
+# ORTaxlot in the COUNTY_REGISTRY normalized lookup (orb_db.lookup_parcel_by_point).
+#
+# What works: (a) L1 inline data is the source of truth for owner / situs /
+# mailing / map_number / account / tax_code_area / ORTaxlot. (b) Verified deep
+# link to the Property Account Search landing page (assessment.bentoncountyor.gov).
+# The portal's bcaps search form is POST-only with no GET parameter surface —
+# per-parcel deep linking is IN FLIGHT pending bcaps form-params reverse-engineering.
+# (c) Zoning / valuation / sale history NOT in L1 — flagged IN FLIGHT for later
+# Benton ZoningService FeatureServer join (gis.co.benton.or.us/.../ZoningService).
+#
+# Records: Benton County Records & Elections at re.bentoncountyor.gov runs a
+# public recorded-document index search at records.co.benton.or.us/Recording/.
+# Structured search + scrape IN FLIGHT (same Tapestry/Laredo-style portal pattern
+# as Lane/Washington/Clackamas — viewstate or session-token gating likely).
+# Best-effort deep link surfaced now.
+#
+# Permits: Benton participates in the STATE Oregon ePermitting portal at
+# aca-oregon.accela.com/oregon — confirmed via cd.bentoncountyor.gov/electronic-
+# permitting which links directly to that surface. So fetch_benton_permits is a
+# CLEAN ONE-LINE WRAPPER around fetch_county_permits('003'). FIPS 003 added to
+# _OREGON_EPERMITTING_FIPS. Validates the brief's reuse hypothesis for Benton.
+# =============================================================================
+
+_BENTON_CACHE_TTL_HOURS = 24
+_BENTON_ASSESS_BASE = "https://assessment.bentoncountyor.gov"
+_BENTON_RECORDS_PORTAL = "https://records.co.benton.or.us/Recording/"
+_BENTON_RECORDS_INDEX_LANDING = "https://re.bentoncountyor.gov/real-property-records-index-search/"
+
+
+def fetch_benton_assessment(taxlot: str, force_refresh: bool = False) -> dict:
+    """Benton assessment snapshot for a taxlot — SQL pass-through over parcels_benton.
+
+    Returns aggregated owner (STRING_AGG over Party_Name) + situs + mailing +
+    portal deep link, with 24h cache. Valuation / zoning / sale history are
+    NOT in Benton's L1; those are flagged IN FLIGHT in the response and will
+    arrive when the bcaps form-params scrape or a paid Tyler integration lands.
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    if not force_refresh:
+        try:
+            with _conn() as cn, cn.cursor() as cur:
+                cur.execute(
+                    "SELECT taxlot, account_num, payload_json, fetched_at, last_error "
+                    "FROM benton_assessment_cache WHERE taxlot = %s",
+                    (taxlot,),
+                )
+                cached = cur.fetchone()
+                if cached:
+                    age = _dt.now(_tz.utc) - cached["fetched_at"]
+                    if age < _td(hours=_BENTON_CACHE_TTL_HOURS):
+                        payload = cached["payload_json"] or {}
+                        payload["from_cache"] = True
+                        payload["cached_age_hours"] = round(age.total_seconds() / 3600, 1)
+                        return payload
+        except Exception as e:
+            print(f"[benton_assessment] cache read error: {e}")
+
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT MIN(account_num) AS account_num,
+                       MIN(maptaxlot) AS maptaxlot,
+                       MIN(map_number) AS map_number,
+                       MIN(tax_code_area) AS tax_code_area,
+                       STRING_AGG(DISTINCT party_name, '; ' ORDER BY party_name)
+                           FILTER (WHERE party_name IS NOT NULL) AS owner_name,
+                       COUNT(DISTINCT party_name)
+                           FILTER (WHERE party_name IS NOT NULL) AS owner_count,
+                       MIN(situs_addr1) AS situs_addr1,
+                       MIN(situs_city) AS situs_city,
+                       MIN(situs_state) AS situs_state,
+                       MIN(situs_zip) AS situs_zip,
+                       MIN(in_care_of) AS in_care_of,
+                       MIN(mail_line1) AS mail_line1,
+                       MIN(mail_line2) AS mail_line2,
+                       MIN(mail_city) AS mail_city,
+                       MIN(mail_state) AS mail_state,
+                       MIN(mail_zip) AS mail_zip,
+                       ROUND((ST_Area((MIN(geom))::geography) / 4046.8564224)::numeric, 3) AS acres
+                  FROM parcels_benton
+                 WHERE ortaxlot = %s
+                """,
+                (taxlot,),
+            )
+            row = cur.fetchone()
+    except Exception as e:
+        return {"found": False, "reason": f"DB error: {e}", "taxlot": taxlot}
+
+    if not row or not row["account_num"]:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_benton", "taxlot": taxlot}
+
+    situs_addr1 = row["situs_addr1"]
+    situs_address = None
+    if situs_addr1 and situs_addr1 != "UNASSIGNED":
+        situs_address = situs_addr1
+        if row["situs_city"]:
+            situs_address += f", {row['situs_city']}"
+
+    payload = {
+        "found": True,
+        "from_cache": False,
+        "taxlot": taxlot,
+        "county_fips": "003",
+        "account_number": row["account_num"],
+        "maptaxlot": row["maptaxlot"],
+        "map_number": row["map_number"],
+        "tax_code_area": row["tax_code_area"],
+        "source": "parcels_benton L1 inline (Benton GIS TaxlotOwners FeatureServer; owner-aggregated via STRING_AGG)",
+        "snapshot": {
+            "owner": {
+                "names": row["owner_name"],
+                "owner_count": row["owner_count"],
+                "in_care_of": row["in_care_of"],
+            },
+            "situs": {
+                "address": situs_address,
+                "street1": situs_addr1 if situs_addr1 != "UNASSIGNED" else None,
+                "city": row["situs_city"],
+                "state": row["situs_state"],
+                "zip": row["situs_zip"],
+                "is_vacant_or_unaddressed": situs_addr1 == "UNASSIGNED",
+            },
+            "mailing": {
+                "line1": row["mail_line1"],
+                "line2": row["mail_line2"],
+                "city": row["mail_city"],
+                "state": row["mail_state"],
+                "zip": row["mail_zip"],
+            },
+            "geometry": {
+                "acres": float(row["acres"]) if row["acres"] is not None else None,
+            },
+        },
+        "deep_links": {
+            "assessment_portal": f"{_BENTON_ASSESS_BASE}/property-account-search/",
+            "assessment_home": _BENTON_ASSESS_BASE,
+        },
+        "in_flight": [
+            "Per-parcel deep link — assessment.bentoncountyor.gov property-account-search is a POST-only WordPress bcaps form with no GET deep-link surface. Portal landing is the verified working link until bcaps form-params are captured.",
+            "Real Market Value / Assessed Value / sale history — NOT in Benton's L1 TaxlotOwners service. Resolved via assessment portal click-through (manual) until bcaps scrape lands or a paid Tyler integration is wired.",
+            "Zoning — Benton ZoningService is a separate FeatureServer at gis.co.benton.or.us/.../ZoningService. Spatial join into the L2 fetcher is queued.",
+        ],
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO benton_assessment_cache (taxlot, account_num, payload_json, fetched_at, last_error)
+                   VALUES (%s, %s, %s::jsonb, NOW(), NULL)
+                   ON CONFLICT (taxlot) DO UPDATE SET
+                       account_num = EXCLUDED.account_num,
+                       payload_json = EXCLUDED.payload_json,
+                       fetched_at = NOW(),
+                       last_error = NULL""",
+                (taxlot, row["account_num"], _json.dumps(payload)),
+            )
+            cn.commit()
+    except Exception as e:
+        print(f"[benton_assessment] cache write error: {e}")
+
+    return payload
+
+
+def fetch_benton_records(taxlot: str, force_refresh: bool = False) -> dict:
+    """Benton recorded-documents / deed-chain for a taxlot.
+
+    CURRENTLY IN FLIGHT — Benton runs a public recorded-document search at
+    records.co.benton.or.us/Recording/, but the search interface is session-token
+    gated (no clean GET deep link with pre-filled params). Returns current owner
+    name (from L1 aggregation) + verified deep links to the recordings portal
+    and the Records & Elections landing page, with honest IN FLIGHT framing.
+    """
+    if not taxlot or not isinstance(taxlot, str):
+        return {"found": False, "reason": "Invalid taxlot"}
+    taxlot = taxlot.strip().upper()
+
+    if not force_refresh:
+        try:
+            with _conn() as cn, cn.cursor() as cur:
+                cur.execute(
+                    "SELECT taxlot, owner_name, documents_json, document_count, fetched_at "
+                    "FROM benton_records_cache WHERE taxlot = %s",
+                    (taxlot,),
+                )
+                cached = cur.fetchone()
+                if cached:
+                    age = _dt.now(_tz.utc) - cached["fetched_at"]
+                    if age < _td(hours=_BENTON_CACHE_TTL_HOURS):
+                        return {
+                            "found": True,
+                            "from_cache": True,
+                            "cached_age_hours": round(age.total_seconds() / 3600, 1),
+                            "taxlot": taxlot,
+                            "owner_name": cached["owner_name"],
+                            "snapshot": {"owner_now": cached["owner_name"]},
+                            "documents": cached["documents_json"] or [],
+                            "document_count": cached["document_count"] or 0,
+                            "deep_links": {
+                                "recordings_portal": _BENTON_RECORDS_PORTAL,
+                                "records_index_landing": _BENTON_RECORDS_INDEX_LANDING,
+                            },
+                            "in_flight": [
+                                "Structured scrape of records.co.benton.or.us/Recording/ — session-token gated portal; deep-link-only until session capture or paid integration lands.",
+                            ],
+                            "fetched_at": cached["fetched_at"].isoformat(),
+                        }
+        except Exception as e:
+            print(f"[benton_records] cache read error: {e}")
+
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """SELECT MIN(account_num) AS account_num,
+                          STRING_AGG(DISTINCT party_name, '; ' ORDER BY party_name)
+                              FILTER (WHERE party_name IS NOT NULL) AS owner_name,
+                          COUNT(DISTINCT party_name)
+                              FILTER (WHERE party_name IS NOT NULL) AS owner_count,
+                          MIN(situs_addr1) AS situs_addr1,
+                          MIN(situs_city) AS situs_city
+                     FROM parcels_benton
+                    WHERE ortaxlot = %s""",
+                (taxlot,),
+            )
+            row = cur.fetchone()
+    except Exception as e:
+        return {"found": False, "reason": f"DB error: {e}", "taxlot": taxlot}
+
+    if not row or not row["account_num"]:
+        return {"found": False, "reason": f"Taxlot {taxlot} not in parcels_benton", "taxlot": taxlot}
+
+    payload = {
+        "found": True,
+        "from_cache": False,
+        "taxlot": taxlot,
+        "owner_name": row["owner_name"],
+        "snapshot": {
+            "owner_now": row["owner_name"],
+            "owner_count": row["owner_count"],
+            "situs_address": (
+                row["situs_addr1"] + ((', ' + row["situs_city"]) if row["situs_city"] else '')
+                if row["situs_addr1"] and row["situs_addr1"] != "UNASSIGNED"
+                else None
+            ),
+        },
+        "documents": [],
+        "document_count": 0,
+        "deep_links": {
+            "recordings_portal": _BENTON_RECORDS_PORTAL,
+            "records_index_landing": _BENTON_RECORDS_INDEX_LANDING,
+            "assessment_portal": f"{_BENTON_ASSESS_BASE}/property-account-search/",
+        },
+        "in_flight": [
+            "Full chain of title / deed history — Benton's records portal at records.co.benton.or.us/Recording/ is session-token gated, no public GET deep-link surface. Open paths: (a) session capture + structured scrape, (b) paid Tyler integration, (c) per-doc Clerk export request.",
+            "Sales chain — same blocker. Most-recent ownership above is current as of last L1 refresh (107,988 owner-rows ingested 2026-05-27).",
+        ],
+        "fetched_at": _dt.now(_tz.utc).isoformat(),
+    }
+
+    try:
+        with _conn() as cn, cn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO benton_records_cache (taxlot, owner_name, documents_json, document_count, fetched_at, last_error)
+                   VALUES (%s, %s, '[]'::jsonb, 0, NOW(), NULL)
+                   ON CONFLICT (taxlot) DO UPDATE SET
+                       owner_name = EXCLUDED.owner_name,
+                       documents_json = EXCLUDED.documents_json,
+                       document_count = EXCLUDED.document_count,
+                       fetched_at = NOW(),
+                       last_error = NULL""",
+                (taxlot, row["owner_name"]),
+            )
+            cn.commit()
+    except Exception as e:
+        print(f"[benton_records] cache write error: {e}")
+
+    return payload
+
+
+def fetch_benton_permits(taxlot: str, force_refresh: bool = False) -> dict:
+    """Benton permits — one-line wrapper around fetch_county_permits for FIPS 003.
+
+    Benton participates in the Oregon state ePermitting portal at
+    aca-oregon.accela.com/oregon (confirmed via cd.bentoncountyor.gov/electronic-
+    permitting). Same deep-link-only IN FLIGHT pattern as Crook/Marion/Lane —
+    server-side scrape gated on viewstate capture or Playwright.
+
+    Brief reuse hypothesis VALIDATED for Benton: cd.bentoncountyor.gov links to
+    the state Accela directly, so this is a clean wrapper and not a county-direct
+    Accela (unlike Washington/Clackamas which run their own tenants).
+    """
+    result = fetch_county_permits(taxlot, "003", force_refresh)
+    if isinstance(result, dict) and result.get("found"):
+        result["routed_via"] = "oregon_state_accela"
+        result["jurisdiction"] = "Benton County (Corvallis / Philomath / Adair Village / Monroe / unincorporated — Oregon state Accela)"
+    return result
+
+
+# =============================================================================
+# LINN County L2/L3 — re-exported from linn_terra (separate module to dodge the
+# five-parallel-session edit thrash on this file; functional contract identical
+# to every other county). Place at end-of-file so callers `from .orb_db import
+# fetch_linn_*` keep working even if Linn lands its own subpackage later.
 # =============================================================================
 from .linn_terra import (
     fetch_linn_assessment,
