@@ -20,9 +20,11 @@ section renders verbatim.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import math
+import os
 import re
 from datetime import datetime, timezone
 
@@ -41,6 +43,39 @@ _USGS_TOPO = "https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapS
 _FEMA_NFHL = "https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/export"
 
 _IMG_W, _IMG_H = 1100, 770  # map image pixel size (aspect ~1.43)
+
+# Map-image cache. Imagery is the report's slow path (~10s of a ~12s build is the
+# 3 Esri/USGS/FEMA export fetches). It's also stable month-to-month, so we cache the
+# raw export PNG in Redis keyed by (service, bbox, size, transparent). Warm builds
+# skip the network entirely and land near the ~2s PostGIS+PIL floor.
+_MAP_CACHE_PREFIX = "terra:mapimg:v1:"
+_MAP_CACHE_TTL = int(os.environ.get("TERRA_MAP_CACHE_TTL", str(30 * 24 * 3600)))  # 30d
+_redis_client = None
+_redis_tried = False
+
+
+def _map_cache():
+    """Lazy binary-safe Redis client for map images. Optional by design: any
+    connection failure fails open (returns None) so report generation never depends
+    on the cache being up. Separate from the text Yindo client (we need raw bytes)."""
+    global _redis_client, _redis_tried
+    if _redis_tried:
+        return _redis_client
+    _redis_tried = True
+    try:
+        import redis
+        c = redis.Redis(
+            host=os.getenv("YINDO_REDIS_HOST", "redis"),
+            port=int(os.getenv("YINDO_REDIS_PORT", "6379")),
+            decode_responses=False,
+            socket_connect_timeout=1,
+            socket_timeout=2,
+        )
+        c.ping()
+        _redis_client = c
+    except Exception:
+        _redis_client = None
+    return _redis_client
 
 
 def _now_iso() -> str:
@@ -137,7 +172,14 @@ def _padded_bbox(xmin, ymin, xmax, ymax, pad, w=_IMG_W, h=_IMG_H):
     return (clon - hx, clat - hy, clon + hx, clat + hy)
 
 
-def _arcgis_png(base, bbox, transparent=False, size=(_IMG_W, _IMG_H)) -> bytes | None:
+def _arcgis_png(base, bbox, transparent=False,
+                size=(_IMG_W, _IMG_H)) -> tuple[bytes | None, str | None]:
+    """Fetch an ArcGIS export PNG. Returns (png_bytes_or_None, pulled_at_iso_or_None).
+
+    Redis-cached by (service, bbox, size, transparent). A cache hit returns the stored
+    image AND its true fetch date, so the citations section never relabels a cached
+    image as 'pulled today' — the hard copyright rule requires the pull date be honest.
+    Only successful fetches are cached; failures fall through and retry next build."""
     xmin, ymin, xmax, ymax = bbox
     params = {
         "bbox": f"{xmin},{ymin},{xmax},{ymax}",
@@ -146,14 +188,35 @@ def _arcgis_png(base, bbox, transparent=False, size=(_IMG_W, _IMG_H)) -> bytes |
         "format": "png", "transparent": "true" if transparent else "false",
         "f": "image",
     }
+    cache = _map_cache()
+    ckey = None
+    if cache is not None:
+        raw = (f"{base}|{xmin:.7f},{ymin:.7f},{xmax:.7f},{ymax:.7f}"
+               f"|{size[0]}x{size[1]}|t={int(transparent)}")
+        ckey = _MAP_CACHE_PREFIX + hashlib.sha256(raw.encode()).hexdigest()
+        try:
+            hit = cache.hgetall(ckey)
+            if hit and hit.get(b"png"):
+                at = hit.get(b"at")
+                return hit[b"png"], (at.decode() if at else _now_iso())
+        except Exception:
+            pass
     try:
         r = httpx.get(base, params=params, headers={"User-Agent": _UA}, timeout=30,
                       follow_redirects=True)
         if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
-            return r.content
+            png = r.content
+            at = _now_iso()
+            if cache is not None and ckey is not None:
+                try:
+                    cache.hset(ckey, mapping={"png": png, "at": at})
+                    cache.expire(ckey, _MAP_CACHE_TTL)
+                except Exception:
+                    pass
+            return png, at
     except Exception:
-        return None
-    return None
+        return None, None
+    return None, None
 
 
 def _composite(base_png: bytes, overlay_png: bytes) -> bytes:
@@ -479,18 +542,19 @@ def build_report_context(taxid: str, county_fips: str = "017",
         def make_map(title, base, pad, caption, provider, license_, overlay=True,
                      fema=False):
             bbox = _padded_bbox(bxmin, bymin, bxmax, bymax, pad)
-            png = _arcgis_png(base, bbox)
+            png, png_at = _arcgis_png(base, bbox)
             fema_note = None
             if png and fema:
-                ov = _arcgis_png(_FEMA_NFHL, bbox, transparent=True)
+                ov, ov_at = _arcgis_png(_FEMA_NFHL, bbox, transparent=True)
                 if ov is not None and _overlay_nonempty(ov):
                     png = _composite(png, ov)
                     fema_note = "FEMA NFHL flood layer shown over imagery."
                 else:
                     fema_note = "No mapped Special Flood Hazard Area intersects this parcel."
                 src.add("FEMA flood hazard (NFHL)", "FEMA National Flood Hazard Layer",
-                        _FEMA_NFHL, "Public domain", ok=ov is not None)
-            src.add(f"Map: {title}", provider, base, license_, ok=png is not None)
+                        _FEMA_NFHL, "Public domain", pulled_at=ov_at, ok=ov is not None)
+            src.add(f"Map: {title}", provider, base, license_,
+                    pulled_at=png_at, ok=png is not None)
             if overlay and png and geojson:
                 png = _draw_boundary(png, geojson, bbox)
             return {
