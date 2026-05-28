@@ -234,6 +234,57 @@ async def send_lilith_message_with_markup(chat_id: int, text: str, reply_markup:
             return {}
 
 
+# === CONFIRM-ON-PRIVATE APPROVAL CARDS (DOCTRINE-ACCESS-TIER-READALL-01, 2026-05-28) ===
+# When a confirm-on-private child (Lilith/executive_readall) reaches for a founder-private
+# knowledge_store entry, child_engine withholds the content and appends a pending row to
+# founder_private_access_requests. This fires a Sophia approval card to Iosif for each
+# un-carded pending request. Decoupled from the engine via the DB queue so child_engine
+# stays write-light (its only write is the append). Approve/Deny is handled in
+# process_telegram_callback_query (lilith_priv_approve / lilith_priv_deny).
+async def fire_pending_founder_private_cards(child_canonical_name: str = "lilith"):
+    iosif_id = os.environ.get("IOSIF_TELEGRAM_ID", "7583693994")
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id, entry_title, question_context
+                       FROM founder_private_access_requests
+                       WHERE child_canonical_name = %s AND status = 'pending' AND card_sent = false
+                       ORDER BY requested_at ASC""",
+                    (child_canonical_name,),
+                )
+                rows = cur.fetchall()
+    except Exception as e:
+        print(f"[founder_private] fetch pending error: {e}")
+        return
+
+    for row in rows:
+        req_id, entry_title, question_context = row[0], row[1], row[2]
+        text = (
+            "🔐 *Founder-Private Access Request*\n\n"
+            f"*Lilith* (Jacob Gale) is requesting a founder-private item:\n"
+            f"📄 *{entry_title}*\n\n"
+            + (f"_His question:_ {question_context}\n\n" if question_context else "")
+            + "Approve → contents are released to Jacob via Lilith.\n"
+            "Deny → withheld. Nothing is deleted either way."
+        )
+        markup = {"inline_keyboard": [[
+            {"text": "✅ Approve", "callback_data": f"lilith_priv_approve:{req_id}"},
+            {"text": "🚫 Deny", "callback_data": f"lilith_priv_deny:{req_id}"},
+        ]]}
+        try:
+            await send_sophia_message_with_markup(int(iosif_id), text, markup)
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE founder_private_access_requests SET card_sent = true WHERE id = %s",
+                        (req_id,),
+                    )
+                    conn.commit()
+        except Exception as e:
+            print(f"[founder_private] card send error (req={req_id}): {e}")
+
+
 # === YINDO BRIDGE HELPERS (2026-05-27) ===
 # Yindo is the Telegram interface to host-side Claude Code. Same Yakov, different
 # interface (see CLAUDE.md "One Yakov, multiple interfaces"). The FastAPI app only
@@ -2804,6 +2855,87 @@ async def process_telegram_callback_query(callback_query: dict, response_bot_tok
         action = data
         reminder_id = None
 
+    # ── Confirm-on-private approval (DOCTRINE-ACCESS-TIER-READALL-01, 2026-05-28) ──
+    # Iosif taps Approve/Deny on the Sophia card. callback_data = lilith_priv_(approve|deny):<req_id>.
+    if action in ("lilith_priv_approve", "lilith_priv_deny"):
+        req_id = reminder_id
+        if not req_id:
+            if callback_query_id:
+                await answer_telegram_callback_query(callback_query_id, "No request id.")
+            return {"ok": False, "reason": "missing_request_id"}
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT entry_id, entry_title, requesting_telegram_id, status
+                           FROM founder_private_access_requests WHERE id = %s""",
+                        (req_id,),
+                    )
+                    row = cur.fetchone()
+        except Exception as _e:
+            print(f"[lilith_priv] load error: {_e}")
+            row = None
+        if not row:
+            if callback_query_id:
+                await answer_telegram_callback_query(callback_query_id, "Request not found.")
+            return {"ok": False, "reason": "request_not_found"}
+        entry_id, entry_title, requester_tid, status = row[0], row[1], row[2], row[3]
+        if status != "pending":
+            if callback_query_id:
+                await answer_telegram_callback_query(callback_query_id, f"Already {status}.")
+            return {"ok": True, "already": status}
+        from_user = callback_query.get("from", {}) or {}
+        decider = str(from_user.get("id", ""))
+
+        if action == "lilith_priv_approve":
+            content = None
+            try:
+                from children.orb_db import get_knowledge_entry_full
+                entry = get_knowledge_entry_full(str(entry_id))
+                content = entry.get("content") if entry else None
+            except Exception as _e:
+                print(f"[lilith_priv_approve] fetch error: {_e}")
+            try:
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """UPDATE founder_private_access_requests
+                               SET status='approved', decided_at=now(), decided_by=%s WHERE id=%s""",
+                            (decider, req_id),
+                        )
+                        conn.commit()
+            except Exception as _e:
+                print(f"[lilith_priv_approve] update error: {_e}")
+            if requester_tid and content:
+                msg = (f"🔓 *Approved by Iosif* — founder-private item released:\n\n"
+                       f"*{entry_title}*\n\n{content}")
+                await send_lilith_message(int(requester_tid), msg[:3900])
+            elif requester_tid:
+                await send_lilith_message(int(requester_tid),
+                    f"🔓 *{entry_title}* was approved, but I couldn't load its contents — tell Iosif to check the logs.")
+            if callback_query_id:
+                await answer_telegram_callback_query(callback_query_id, "Approved ✅ — released to Jacob.")
+            return {"ok": True, "action": "approved", "request_id": str(req_id)}
+
+        # deny
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE founder_private_access_requests
+                           SET status='denied', decided_at=now(), decided_by=%s WHERE id=%s""",
+                        (decider, req_id),
+                    )
+                    conn.commit()
+        except Exception as _e:
+            print(f"[lilith_priv_deny] update error: {_e}")
+        if requester_tid:
+            await send_lilith_message(int(requester_tid),
+                f"🚫 That item (*{entry_title}*) is founder-private and access wasn't granted right now. Happy to pull anything else.")
+        if callback_query_id:
+            await answer_telegram_callback_query(callback_query_id, "Denied 🚫 — withheld.")
+        return {"ok": True, "action": "denied", "request_id": str(req_id)}
+
     # ── TERRA-FIELD-7C-2: parcel button callback handlers ──────────────
     if action.startswith("parcel_") and _TERRA_DIAL_AVAILABLE:
         # data format: 'parcel_permits:<taxlot>'
@@ -4329,6 +4461,11 @@ async def lilith_webhook(request: Request):
         except Exception as _engine_err:
             print(f"[lilith_webhook] engine error: {_engine_err}")
             await send_lilith_message(chat_id, "Lilith hit an internal error. Yakov has been logged.")
+        # Confirm-on-private: fire any approval cards the engine queued this turn.
+        try:
+            await fire_pending_founder_private_cards("lilith")
+        except Exception as _fp_err:
+            print(f"[lilith_webhook] founder-private card fire error: {_fp_err}")
     return {"ok": True}
 
 

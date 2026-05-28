@@ -9,7 +9,10 @@ Doctrine:
 - Tier defines tool access. Override per-child via enabled_tools/disabled_tools.
 - Sonnet 4.6 is default; rate-limit triggers Haiku fallback.
 - All errors get sanitized before user-facing return.
-- Child_engine NEVER writes through orb_db (read-only by design).
+- Child_engine reads through orb_db only (orb_db stays read-only by design). The SOLE
+  write it performs is an append to founder_private_access_requests — the confirm-on-
+  private access-audit queue (DOCTRINE-ACCESS-TIER-READALL-01). That is a record-of-
+  access, never a content/doctrine write, and it does not go through orb_db.
 """
 import os
 import json
@@ -262,6 +265,41 @@ TIER_TOOLS = {
         # Decommissioned children. NO tools.
     ],
 }
+
+# executive_readall (DOCTRINE-ACCESS-TIER-READALL-01, 2026-05-28) — Lilith / Jacob Gale.
+# C-level read-all: executive's tool breadth PLUS company-wide read (AI spend, Yakov
+# handoffs/commits). DELIBERATELY omits get_honeypot_hits / get_blocklist /
+# get_tombstoned_users — those expose the Fred surveillance + adversary layer with no
+# runtime gate, and Hard Rule #2 (Fred material is never disclosed to third parties)
+# outranks "read-all". Flip them on here (or via Lilith.enabled_tools) only on Iosif's
+# explicit say-so. knowledge_store private rows are NOT removed here — they are gated at
+# runtime by confirm-on-private (see CONFIRM_ON_PRIVATE_TIERS), so the row stays visible
+# but its body is withheld until the founder approves. Composed off executive to avoid
+# duplicating the (long, fast-growing) TERRA fetcher list.
+TIER_TOOLS["executive_readall"] = TIER_TOOLS["executive"] + [
+    "get_ai_spend_today",
+    "query_yakov_handoffs",
+    "query_yakov_commits",
+]
+
+# Tiers whose knowledge_store reads are gated by confirm-on-private: is_private=true
+# entries are withheld from the model and an approval card fires to the founder via
+# Sophia before the content is ever released. DOCTRINE-ACCESS-TIER-READALL-01.
+# NOTE for a future session: the `executive` tier (Ophelia/Dan) currently has UNGATED
+# private read because no gate was ever built for it. Extending this set to "executive"
+# is the obvious follow-up, but is OUT OF SCOPE tonight (don't change Dan's bot behavior
+# without Iosif's instruction).
+CONFIRM_ON_PRIVATE_TIERS = {"executive_readall"}
+
+# Tiers exempt from the (future) TERRA rate limiter — internal C-level executives.
+# DOCTRINE-SEAT-INTEGRITY-01 caps apply to SOLD external seats, NOT these tiers.
+# The limiter doesn't exist yet; this is the forward-compatible tag it will read.
+TERRA_UNLIMITED_TIERS = {"sovereign", "executive_readall"}
+
+
+def tier_is_terra_unlimited(tier: str) -> bool:
+    """True if `tier` is exempt from TERRA rate limits (internal C-level)."""
+    return tier in TERRA_UNLIMITED_TIERS
 
 
 # =============================================================================
@@ -1116,13 +1154,100 @@ def resolve_tools_for_child(child: dict) -> list[dict]:
 # EXECUTION ENGINE
 # =============================================================================
 
-def _execute_local_tool(name: str, tool_input: dict):
-    """Execute a local tool (orb_db function) with truncation guard."""
+# =============================================================================
+# CONFIRM-ON-PRIVATE GATE (DOCTRINE-ACCESS-TIER-READALL-01, 2026-05-28)
+# =============================================================================
+# For CONFIRM_ON_PRIVATE_TIERS, knowledge_store rows with is_private=true are never
+# handed to the model. Browsing (search) keeps the title/tags so the child knows the
+# item EXISTS, but the body is replaced with a locked note. A full-read attempt enqueues
+# an access request; the webhook layer fires a Sophia approval card to the founder and,
+# on approval, pushes the content to the requester. Nothing is hidden or deleted — this
+# is a record-of-access on the leverage layer, exactly per the locked decision.
+
+_PRIVATE_LOCKED_NOTE = (
+    "🔒 FOUNDER-PRIVATE. This entry exists, but its contents are gated. An approval "
+    "request has been sent to Iosif via Sophia. If he approves, the full contents will "
+    "be delivered to you here. Tell the user the item exists and that founder approval "
+    "is pending — do NOT guess, summarize, or reconstruct what it might contain."
+)
+
+
+def _record_founder_private_request(child_canonical_name: str, requesting_telegram_id: str,
+                                    entry_id: str, entry_title: str, question_context: str):
+    """APPEND-ONLY access-audit write — the ONLY DB write child_engine performs.
+    Records that a confirm-on-private child reached for a founder-private entry so the
+    webhook layer can fire a Sophia approval card. Dedupes against an existing pending
+    request for the same child+entry. Never writes content or doctrine."""
+    if not entry_id:
+        return None
+    try:
+        with _conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT id FROM founder_private_access_requests
+                   WHERE child_canonical_name = %s AND entry_id = %s AND status = 'pending'
+                   LIMIT 1""",
+                (child_canonical_name, entry_id),
+            )
+            existing = cur.fetchone()
+            if existing:
+                return str(existing["id"])
+            cur.execute(
+                """INSERT INTO founder_private_access_requests
+                   (child_canonical_name, requesting_telegram_id, entry_id, entry_title, question_context)
+                   VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+                (child_canonical_name, requesting_telegram_id or None, entry_id,
+                 entry_title, (question_context or "")[:500]),
+            )
+            new_id = cur.fetchone()["id"]
+            conn.commit()
+            return str(new_id)
+    except Exception as e:
+        logger.error("founder_private_request write failed (entry=%s): %s", entry_id, e)
+        return None
+
+
+def _gate_private_kb(child: dict, tool_name: str, tool_input: dict, result, user_message: str):
+    """Redact founder-private knowledge_store content for confirm-on-private tiers and
+    enqueue an approval request on full-read. Non-private content passes through clean."""
+    if child.get("tier") not in CONFIRM_ON_PRIVATE_TIERS:
+        return result
+    name = child.get("canonical_name", "")
+    req_tid = str(child.get("bound_telegram_id") or "")
+
+    if tool_name == "search_knowledge_store" and isinstance(result, list):
+        for row in result:
+            if isinstance(row, dict) and row.get("is_private"):
+                row["content_preview"] = _PRIVATE_LOCKED_NOTE
+                row["content_full_length"] = 0
+                row["_locked"] = True
+        return result
+
+    if tool_name == "get_knowledge_entry_full" and isinstance(result, dict) and result.get("is_private"):
+        entry_id = str(result.get("id") or tool_input.get("entry_id") or "")
+        title = result.get("title") or "(untitled founder-private entry)"
+        _record_founder_private_request(name, req_tid, entry_id, title, user_message)
+        return {
+            "id": entry_id, "title": title,
+            "content_type": result.get("content_type"),
+            "tags": result.get("tags"),
+            "is_private": True, "_locked": True,
+            "content": _PRIVATE_LOCKED_NOTE,
+        }
+    return result
+
+
+def _execute_local_tool(name: str, tool_input: dict, child: dict | None = None, user_message: str = ""):
+    """Execute a local tool (orb_db function) with truncation guard.
+    When `child` is a confirm-on-private tier, founder-private knowledge_store content is
+    gated on the RAW result here — before truncation — so a private body can never leak
+    through the truncated preview path."""
     fn = LOCAL_TOOL_FUNCTIONS.get(name)
     if not fn:
         return {"error": f"Unknown tool: {name}"}
     try:
         result = fn(**tool_input)
+        if child is not None and name in ("search_knowledge_store", "get_knowledge_entry_full"):
+            result = _gate_private_kb(child, name, tool_input, result, user_message)
         result_json = json.dumps(result, default=str)
         if len(result_json) > MAX_TOOL_RESULT_CHARS:
             return {
@@ -1269,7 +1394,8 @@ async def ask_child(canonical_name: str, user_message: str, conversation_history
                         tool_calls_made.append(block.name)
                         if block.name == "web_search":
                             continue
-                        result = _execute_local_tool(block.name, block.input or {})
+                        result = _execute_local_tool(block.name, block.input or {},
+                                                     child=child, user_message=user_message)
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": block.id,
