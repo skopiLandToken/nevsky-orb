@@ -758,6 +758,45 @@ COUNTY_REGISTRY = {
             LIMIT 1
         """,
     },
+    "007": {  # Clatsop (FIPS 41-007) — Tier 3 Standard, NW coast (Astoria / Seaside / Cannon Beach)
+        "name": "Clatsop",
+        # bbox: NW corner of Oregon — Astoria N, Cannon Beach S, Pacific W,
+        # Columbia-county E. Measured extent (45.77, 46.29, -124.04, -123.36);
+        # padded so coastal-edge and east-county parcels don't fall through.
+        "bbox": (45.70, 46.35, -124.10, -123.30),
+        # Clatsop's county-direct Taxlots FeatureServer ships owner (up to 3
+        # lines) + situs + account + property class + year built inline. No
+        # valuation (token-gated Assessment_Tax folder) and no zoning on the
+        # taxlot record (separate Zoning_Layers service — Jackson-pattern
+        # follow-up). Acreage derives geodesically from geom (source has no
+        # acreage column).
+        "query": """
+            SELECT taxlot,
+                   COALESCE(taxmapnum, map_number) AS section_id,
+                   ROUND((ST_Area(geom::geography) / 4046.8564224)::numeric, 3) AS acres,
+                   'https://www.clatsopcounty.gov/244/Public-Property-Search' AS county_url,
+                   COALESCE(taxmapnum, map_number) AS map_number,
+                   COALESCE(
+                       NULLIF(CONCAT_WS(' & ',
+                                        NULLIF(owner_line, ''),
+                                        NULLIF(owner_ll_1, ''),
+                                        NULLIF(owner_ll_2, '')), ''),
+                       owner_line
+                   ) AS owner_name,
+                   CASE
+                       WHEN situs_address IS NULL OR situs_address = '' THEN NULL
+                       ELSE situs_address || COALESCE(', ' || NULLIF(situs_city, ''), '')
+                   END AS situs_address,
+                   NULL::text AS zone_code,
+                   NULL::text AS zone_label,
+                   ST_AsText(ST_Centroid(geom)) AS parcel_centroid,
+                   'Clatsop'::text AS county_name,
+                   '007'::text AS county_fips
+            FROM parcels_clatsop
+            WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            LIMIT 1
+        """,
+    },
     # Jefferson (031) lands here when its L1 table exists.
 }
 
@@ -1297,6 +1336,10 @@ def fetch_crook_assessment(taxlot: str, force_refresh: bool = False) -> dict:
 # fetch_county_permits — counties NOT in this set get a structured response
 # saying the state portal won't have their permits, look elsewhere.
 _OREGON_EPERMITTING_FIPS = {
+    "007",  # Clatsop      — Tier 3 Standard coastal. All jurisdictions (Astoria /
+            #                Seaside / Cannon Beach / Gearhart / Warrenton /
+            #                unincorporated) ride state Accela; no county-direct
+            #                permits portal or permits GIS FeatureServer found.
     "003",  # Benton       — confirmed via cd.bentoncountyor.gov/electronic-permitting
             #                links directly to aca-oregon.accela.com/oregon as the county e-permitting surface.
     "013",  # Crook        — confirmed via co.crook.or.us/commdev FAQ
@@ -4561,3 +4604,17 @@ def fetch_douglas_permits(taxlot: str, force_refresh: bool = False) -> dict:
         result["routed_via"] = "oregon_state_accela"
         result["jurisdiction"] = "Douglas County (Roseburg / Sutherlin / Winston / Myrtle Creek / Canyonville / Reedsport / unincorporated — Oregon state Accela)"
     return result
+
+
+# =============================================================================
+# CLATSOP County L2/L3 (FIPS 007) — Tier 3 Standard, coastal cluster — re-exported
+# from clatsop_terra (separate module, linn/polk/yamhill/josephine precedent, to
+# avoid concurrent-edit thrash during Yindo parallel-session expansions). Contract
+# identical to every other county; callers keep using
+# `from .orb_db import fetch_clatsop_*`.
+# =============================================================================
+from .clatsop_terra import (  # noqa: E402
+    fetch_clatsop_assessment,
+    fetch_clatsop_records,
+    fetch_clatsop_permits,
+)

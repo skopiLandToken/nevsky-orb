@@ -75,6 +75,9 @@ from .orb_db import (
     fetch_josephine_assessment,
     fetch_josephine_records,
     fetch_josephine_permits,
+    fetch_clatsop_assessment,
+    fetch_clatsop_records,
+    fetch_clatsop_permits,
     query_yakov_handoffs,
     query_yakov_commits,
     calculate_lot_yield,
@@ -150,6 +153,9 @@ TIER_TOOLS = {
         "fetch_josephine_assessment",
         "fetch_josephine_records",
         "fetch_josephine_permits",
+        "fetch_clatsop_assessment",
+        "fetch_clatsop_records",
+        "fetch_clatsop_permits",
         "query_yakov_handoffs",
         "query_yakov_commits",
         "calculate_lot_yield",
@@ -205,6 +211,9 @@ TIER_TOOLS = {
         "fetch_josephine_assessment",
         "fetch_josephine_records",
         "fetch_josephine_permits",
+        "fetch_clatsop_assessment",
+        "fetch_clatsop_records",
+        "fetch_clatsop_permits",
         "calculate_lot_yield",
         "web_search",
     ],
@@ -792,6 +801,36 @@ ALL_TOOL_SCHEMAS = {
             "required": ["taxlot"]
         }
     },
+    "fetch_clatsop_assessment": {
+        "name": "fetch_clatsop_assessment",
+        "description": "TERRA: Fetch the Clatsop County assessment + ownership + situs snapshot for a taxlot (Astoria / Seaside / Cannon Beach / Gearhart / Warrenton / unincorporated — Oregon's NW-corner coast, tourism + STR market). Use when the user asks about a Clatsop parcel. Source is Clatsop County's OWN Taxlots FeatureServer (not the ODF overlay), pure SQL pass-through over parcels_clatsop L1 inline — NO scraper, NO viewstate gating, NO HTTP per call. Ships: owner (up to 3 lines OWNER_LINE/OWNER_LL_1/OWNER_LL_2 + IN_CARE_OF, 99.8% populated), full mailing block, situs (SITUS_ADDR + SITUS_CITY, 68%), account (ACCOUNT_ID, 99.9%), property class (PROPERTY_C + STAT_CLASS), YEAR_BUILT (67%), tax code, maintenance-area / neighborhood, septic status, and geodesic acreage. IN FLIGHT — flag honestly, never invent: VALUATION (no assessed/RMV in the public layer — token-gated Assessment_Tax folder; broker pulls from Public Property Search via account_id); ZONING (not on the taxlot record — separate Zoning_Layers MapServer with county + Astoria/Cannon Beach/Gearhart/Seaside/Warrenton layers, ingest queued Jackson-pattern); recorded sale / chain of title (no instrument fields — see fetch_clatsop_records); building detail beyond year built. FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (👤 OWNER / 🏠 SITUS / 🧾 ACCOUNT / 🏗️ BUILDING / 🌍 ACREAGE / 🔗 DEEP LINKS). Surface owner stack + situs + year_built prominently. For the coastal STR audience, surface the transient_room_tax deep link. End with public_property_search as the broker hand-off. Never apologize, never fabricate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Clatsop ORTaxlot (29-char, e.g. '0408.00N09.00W08CD--000000400') or short Taxlot / TAXMAPKEY / TAXLOTKEY or numeric ACCOUNT_ID."},
+                "force_refresh": {"type": "boolean", "default": False, "description": "No-op — Clatsop L2 is a SQL pass-through over L1 inline; freshness comes from the L1 delta refresh."}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_clatsop_records": {
+        "name": "fetch_clatsop_records",
+        "description": "TERRA: Fetch the Clatsop County owner-of-record + recording snapshot for a taxlot. Use when the user asks about deeds, recorded documents, or current ownership of a Clatsop parcel. Returns the current owner(s) of record (up to 3 lines + in-care-of) and mailing block from parcels_clatsop L1 inline, plus deep links to Clatsop County Property Records and Public Records Request. IN FLIGHT — flag honestly: the FULL recorded-instrument chain of title (deed history, instrument numbers, recording dates, sale price) is NOT exposed by the public Clatsop Taxlots layer — no instrument fields in source. The County Property Records surface is the broker hand-off until a structured recording source is wired. FORMATTING: TERRA aesthetic. 📜 emoji header. Lead with owner_of_record, then surface the property_records deep link. Frame the IN FLIGHT as 'full recorded chain is one tap from County Property Records' — never apologize, never fabricate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_clatsop_permits": {
+        "name": "fetch_clatsop_permits",
+        "description": "TERRA: Fetch building permits for a Clatsop County parcel via Oregon's state ePermitting portal (Accela ACA). One-line wrapper around fetch_county_permits('007') — Clatsop is Tier 3 Standard. Per the established pattern (Tier 1 Flagships run county-direct Accela tenants, Tier 2/3/4 ride state Accela), all Clatsop jurisdictions — Astoria, Seaside, Cannon Beach, Gearhart, Warrenton, and unincorporated Clatsop — route through aca-oregon.accela.com/oregon. No dedicated Clatsop permits GIS FeatureServer exists (the county Code_Compliance MapServer is code enforcement, not building permits), so the state-Accela deep link is the canonical surface. IN FLIGHT — same deep-link-only pattern as every other state-Accela county: server-side scrape gated on viewstate capture / Playwright. FORMATTING: TERRA aesthetic. 🚧 emoji header. Surface jurisdiction ('Clatsop County — Oregon state Accela; Tier 3 reuse pattern') and the accela_search deep link as 'one tap from the live state portal.'",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
     "fetch_polk_permits": {
         "name": "fetch_polk_permits",
         "description": "TERRA: Fetch building permits for a Polk County parcel via Oregon's state ePermitting portal (Accela ACA). One-line wrapper around fetch_county_permits('053') — Polk is Tier 2 Major. Per the emerging pattern Clackamas confirmed (Tier 1 Flagships run county-direct Accela tenants, Tier 2/3/4 ride state Accela), Polk jurisdictions — Dallas, Independence, Monmouth, Falls City, Willamina, and unincorporated Polk — all route through aca-oregon.accela.com/oregon. Brief reuse hypothesis VALIDATED — clean fetch_county_permits wrapper, not a county-direct Accela. IN FLIGHT — same deep-link-only pattern as Crook/Marion/Benton: scrape gated on viewstate capture / Playwright. FORMATTING: TERRA aesthetic. 🚧 emoji header. Surface jurisdiction ('Polk County — Oregon state Accela; Tier 2 reuse pattern'). Frame the deep link as 'one tap from the live state portal.'",
@@ -895,6 +934,9 @@ LOCAL_TOOL_FUNCTIONS = {
     "fetch_josephine_assessment": fetch_josephine_assessment,
     "fetch_josephine_records": fetch_josephine_records,
     "fetch_josephine_permits": fetch_josephine_permits,
+    "fetch_clatsop_assessment": fetch_clatsop_assessment,
+    "fetch_clatsop_records": fetch_clatsop_records,
+    "fetch_clatsop_permits": fetch_clatsop_permits,
     "get_site_plans": get_site_plans,
     "get_ai_spend_today": get_ai_spend_today,
     "query_yakov_handoffs": query_yakov_handoffs,
