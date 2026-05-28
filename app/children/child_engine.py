@@ -72,6 +72,9 @@ from .orb_db import (
     fetch_douglas_assessment,
     fetch_douglas_records,
     fetch_douglas_permits,
+    fetch_josephine_assessment,
+    fetch_josephine_records,
+    fetch_josephine_permits,
     query_yakov_handoffs,
     query_yakov_commits,
     calculate_lot_yield,
@@ -144,6 +147,9 @@ TIER_TOOLS = {
         "fetch_douglas_assessment",
         "fetch_douglas_records",
         "fetch_douglas_permits",
+        "fetch_josephine_assessment",
+        "fetch_josephine_records",
+        "fetch_josephine_permits",
         "query_yakov_handoffs",
         "query_yakov_commits",
         "calculate_lot_yield",
@@ -196,6 +202,9 @@ TIER_TOOLS = {
         "fetch_douglas_assessment",
         "fetch_douglas_records",
         "fetch_douglas_permits",
+        "fetch_josephine_assessment",
+        "fetch_josephine_records",
+        "fetch_josephine_permits",
         "calculate_lot_yield",
         "web_search",
     ],
@@ -753,6 +762,36 @@ ALL_TOOL_SCHEMAS = {
             "required": ["taxlot"]
         }
     },
+    "fetch_josephine_assessment": {
+        "name": "fetch_josephine_assessment",
+        "description": "TERRA: Fetch the Josephine County assessment + ownership + zoning + recent-sale snapshot for a taxlot (Grants Pass / Cave Junction / Merlin / Selma / Williams / Wolf Creek / Kerby / O'Brien / Wilderville / Sunny Valley / Applegate / unincorporated). Use when the user asks about a Josephine parcel — Southern Oregon Rogue Valley west half, paired with Jackson for the full Southern Oregon broker audience. Josephine ships the RICHEST L1 inline surface in TERRA: source ships ALL of — owner_name (NAME), full mailing block (ADDR1/2/3 + City/State/ZIP/CSZ), situs parsed by component (SITUS + SITUS_CITY + SITUS_ST + SITUS_ZIP + ST_NO + SITUS_PREF + ST_NAME + SITUS_SUFF), account (R-number ACCOUNT + ACCTSTATUS + map identifiers), valuation FULLY DECOMPOSED (RMV total + LAND_MKT + LAND_APPR + IMP_VALUE + ASSD_VALUE + APPR_VALUE — richer than Polk which ships only assessed, richer than Douglas which ships assessed + RMV without the appraised breakdown), 3 acreage sources (ACREAGE / LEGAL_ACRE / GIS_Acres), building details (YR_BLT + SQ_FT + LIVING_AREA + BEDRMS + BLDG_CLASS + MH_MAKE), tax routing (CODE / MAINT / NBHD), INLINE ZONING (Zone field — no separate zoning service needed, unlike Jackson), AND the most-recent recorded sale fully decomposed (SALE_DATE + SALE_PRICE + DEED_TYPE + INST_NO + SALE_TYPE — richer than Jackson which surfaces owner only, richer than Polk which ships no sale price). NO scraper, NO viewstate gating, NO HTTP per call — pure SQL pass-through over parcels_josephine. IN FLIGHT — flag honestly, do not invent: JCPA per-account deep-link parameterization (lookup is ASP.NET viewstate-gated; the broker clicks through and pastes ACCOUNT to land on parcel detail); multi-year tax payment history (same viewstate-gating as Marion / Jackson PDO); full multi-instrument chain of title (Clerk's Tessera Public Records index, session-gated). FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (👤 OWNER / 🏠 SITUS / 🧾 ACCOUNT / 🏘️ ZONING / 💰 VALUATION / 🌍 ACREAGE / 🏗️ BUILDING / 📜 RECENT SALE / 🔗 DEEP LINKS). Surface RMV total + assessed total prominently — both are inline, call out the RMV vs assessed split. Surface 📜 RECENT SALE prominently when recent_sale.date is present — Josephine ships the latest deed inline (rare and powerful). End with property_data_lookup + clerk_recording deep links as broker hand-off.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Josephine MapNum (14-char canonical, e.g. '36050800003500' for Josephine County Courthouse area) or MNX (16-char extended) or ACCOUNT (R-number, e.g. 'R300740')."},
+                "force_refresh": {"type": "boolean", "default": False, "description": "Currently no-op — Josephine L2 is a SQL pass-through over L1 inline; freshness comes from the daily L1 delta refresh."}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_josephine_records": {
+        "name": "fetch_josephine_records",
+        "description": "TERRA: Fetch the Josephine County deed / recorded-instrument snapshot for a taxlot. Use when the user asks about deeds, the recent transfer, recorded documents, or 'what was the last instrument on this Josephine parcel.' Returns the MOST-RECENT recorded sale fully decomposed (SALE_DATE + SALE_PRICE + DEED_TYPE + INST_NO + SALE_TYPE — richer than Jackson which surfaces owner only, richer than Polk which ships no sale price), the current owner of record (primary + full mailing block), plus deep links to the Josephine Clerk Recording office and the Property Data Lookup (JCPA). IN FLIGHT — flag honestly: multi-instrument deed chain (only the most-recent is inline; full chain lives in the Clerk's Tessera Public Records index, session-gated — the broker uses the deep link to search by instrument number or grantor/grantee); recorded plats / partitions / easements separate from the conveyance chain (not in the parcels service). FORMATTING: TERRA aesthetic. 📜 emoji header. Lead with latest_recorded_sale (date / price / deed_type / instrument_no — Josephine is the FIRST TERRA county where the most-recent recorded sale comes with all five fields inline, flex it), then owner_of_record, then the clerk_recording deep link. Frame the IN FLIGHT as 'full multi-instrument chain is one tap from the Clerk's Tessera index' — never apologize, never fabricate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_josephine_permits": {
+        "name": "fetch_josephine_permits",
+        "description": "TERRA: Fetch building permits for a Josephine County parcel — FIRST ENERGOV ROUTING IN TERRA. Routes by situs_city. Grants Pass parcels → EnerGov SelfService (selfservice.grantspassoregon.gov/energov_prod/selfservice) — city-direct, NOT state Accela. Grants Pass is the FIRST Oregon city in TERRA running EnerGov (Tyler Technologies) rather than Accela; this is a routing-pattern breakthrough that will repeat in other Oregon EnerGov cities at Tier 3/4. Everything else (Cave Junction + Merlin + Selma + Williams + Wolf Creek + O'Brien + Wilderville + Kerby + Sunny Valley + Applegate + unincorporated) → Oregon state ePermitting Accela via fetch_county_permits('033'). Per the Tier-2-rides-state-Accela pattern (Clackamas confirmed Tier-1-flagships-run-county-direct, Tier-2+ ride state for unincorporated). Returns shape parallel to every other county's permits fetcher: {found, taxlot, county_fips, jurisdiction, situs_city, situs_address, routed_via ('grants_pass_energov_selfservice' OR 'oregon_state_accela'), status, permit_count, permits, deep_links, in_flight[], fetched_at}. IN FLIGHT for Grants Pass: EnerGov SelfService per-parcel deep-link parameterization (search-query schema not yet captured — broker pastes situs or ACCOUNT into SelfService search). IN FLIGHT for state-Accela jurisdictions: same deep-link-only pattern as every other Tier-2 state-Accela county (viewstate-gated retrieval). FORMATTING: TERRA aesthetic. 🚧 emoji header. Lead with routed_via so the broker immediately knows whether they're going to EnerGov or Accela. Surface the appropriate deep link (energov_selfservice OR accela_search) as the one-tap broker hand-off. Frame the EnerGov routing as 'first EnerGov surface in TERRA — Grants Pass joins a small Oregon-EnerGov cohort.' Never apologize, never fabricate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
     "fetch_polk_permits": {
         "name": "fetch_polk_permits",
         "description": "TERRA: Fetch building permits for a Polk County parcel via Oregon's state ePermitting portal (Accela ACA). One-line wrapper around fetch_county_permits('053') — Polk is Tier 2 Major. Per the emerging pattern Clackamas confirmed (Tier 1 Flagships run county-direct Accela tenants, Tier 2/3/4 ride state Accela), Polk jurisdictions — Dallas, Independence, Monmouth, Falls City, Willamina, and unincorporated Polk — all route through aca-oregon.accela.com/oregon. Brief reuse hypothesis VALIDATED — clean fetch_county_permits wrapper, not a county-direct Accela. IN FLIGHT — same deep-link-only pattern as Crook/Marion/Benton: scrape gated on viewstate capture / Playwright. FORMATTING: TERRA aesthetic. 🚧 emoji header. Surface jurisdiction ('Polk County — Oregon state Accela; Tier 2 reuse pattern'). Frame the deep link as 'one tap from the live state portal.'",
@@ -853,6 +892,9 @@ LOCAL_TOOL_FUNCTIONS = {
     "fetch_douglas_assessment": fetch_douglas_assessment,
     "fetch_douglas_records": fetch_douglas_records,
     "fetch_douglas_permits": fetch_douglas_permits,
+    "fetch_josephine_assessment": fetch_josephine_assessment,
+    "fetch_josephine_records": fetch_josephine_records,
+    "fetch_josephine_permits": fetch_josephine_permits,
     "get_site_plans": get_site_plans,
     "get_ai_spend_today": get_ai_spend_today,
     "query_yakov_handoffs": query_yakov_handoffs,
