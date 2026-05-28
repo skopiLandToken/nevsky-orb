@@ -81,6 +81,9 @@ from .orb_db import (
     fetch_tillamook_assessment,
     fetch_tillamook_records,
     fetch_tillamook_permits,
+    fetch_lincoln_assessment,
+    fetch_lincoln_records,
+    fetch_lincoln_permits,
     query_yakov_handoffs,
     query_yakov_commits,
     calculate_lot_yield,
@@ -162,6 +165,9 @@ TIER_TOOLS = {
         "fetch_tillamook_assessment",
         "fetch_tillamook_records",
         "fetch_tillamook_permits",
+        "fetch_lincoln_assessment",
+        "fetch_lincoln_records",
+        "fetch_lincoln_permits",
         "query_yakov_handoffs",
         "query_yakov_commits",
         "calculate_lot_yield",
@@ -223,6 +229,9 @@ TIER_TOOLS = {
         "fetch_tillamook_assessment",
         "fetch_tillamook_records",
         "fetch_tillamook_permits",
+        "fetch_lincoln_assessment",
+        "fetch_lincoln_records",
+        "fetch_lincoln_permits",
         "calculate_lot_yield",
         "web_search",
     ],
@@ -870,6 +879,36 @@ ALL_TOOL_SCHEMAS = {
             "required": ["taxlot"]
         }
     },
+    "fetch_lincoln_assessment": {
+        "name": "fetch_lincoln_assessment",
+        "description": "TERRA: Fetch the Lincoln County parcel + assessment snapshot for a taxlot (Newport / Lincoln City / Toledo / Waldport / Depoe Bay / Yachats / Siletz / unincorporated — Oregon's central coast: beach tourism + STR market). Use when the user asks about a Lincoln parcel. THIN / WASHINGTON-PATTERN ship: Lincoln County runs NO ArcGIS Server, so the full-county L1 (the hosted taxlot21 ORMAP cadastre) ships ONLY polygon attributes — taxlot identifiers / PLSS-derived section / acreage (TaxlotAcre) / map number / REFLink. SQL pass-through over parcels_lincoln, no HTTP per call. Owner / situs / valuation / instrument are NOT in the county-wide cadastre feed — they surface WHEN PRESENT (currently the ~8,373 Newport-UGB parcels after the queued enrichment; NULL elsewhere) and are otherwise flagged IN FLIGHT honestly, NEVER fabricated. IN FLIGHT (flag honestly): owner/mailing/situs county-wide (behind the county GeoMOOSE/WFS a_assessment.map; broker pulls from the Property Information Search page co.lincoln.or.us/1000); valuation (assessed/RMV); building details; recorded instrument. FORMATTING: TERRA SCAN aesthetic. ✨ reveal. Section headers with emoji (🗺️ PARCEL / 📐 SECTION / 🌍 ACREAGE / 👤 OWNER / 🔗 DEEP LINKS). Lead with the parcel identifiers + acreage (what IS live), then surface owner/situs IF present, then frame owner/valuation as 'one tap from Property Information Search.' For the coastal STR audience, surface the transient_lodging_tax deep link. Never apologize, never fabricate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Lincoln ORTaxlot (29-char, e.g. '2107.00S11.00W15DC--000015800') or MapTaxlot, or (post-enrichment) PRIMACCNUM."},
+                "force_refresh": {"type": "boolean", "default": False, "description": "No-op — Lincoln L2 is a SQL pass-through over L1 inline."}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_lincoln_records": {
+        "name": "fetch_lincoln_records",
+        "description": "TERRA: Fetch the Lincoln County recorded-document snapshot for a taxlot. Use when the user asks about deeds / recorded documents / ownership of a Lincoln parcel. THIN ship: the full-county cadastre feed carries NO recorded-instrument data, so the recording chain is IN FLIGHT — surfaced via the County Document Recording deep link (co.lincoln.or.us/177) and Property Information Search. Owner-of-record + latest instrument surface WHEN PRESENT (Newport-UGB subset after the queued enrichment). IN FLIGHT (flag honestly): recorded-instrument chain + sale price (not in cadastre feed); owner-of-record county-wide (behind GeoMOOSE/WFS). FORMATTING: TERRA aesthetic. 📜 emoji header. Surface document_recording + property_information_search deep links. Frame as 'full chain is one tap from County Document Recording.' Never apologize, never fabricate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_lincoln_permits": {
+        "name": "fetch_lincoln_permits",
+        "description": "TERRA: Fetch building permits for a Lincoln County parcel via Oregon's state ePermitting portal (Accela ACA). One-line wrapper around fetch_county_permits('041') — Lincoln is Tier 3 Standard. Per the established pattern (Tier 1 Flagships run county-direct Accela tenants, Tier 2/3/4 ride state Accela), all Lincoln jurisdictions — Newport, Lincoln City, Toledo, Waldport, Depoe Bay, Yachats, Siletz, and unincorporated — route through aca-oregon.accela.com/oregon. No dedicated Lincoln permits GIS FeatureServer exists, so the state-Accela deep link is the canonical surface. IN FLIGHT — same deep-link-only pattern as every other state-Accela county. FORMATTING: TERRA aesthetic. 🚧 emoji header. Surface jurisdiction ('Lincoln County — Oregon state Accela; Tier 3 reuse pattern') and the accela_search deep link as 'one tap from the live state portal.'",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
     "fetch_polk_permits": {
         "name": "fetch_polk_permits",
         "description": "TERRA: Fetch building permits for a Polk County parcel via Oregon's state ePermitting portal (Accela ACA). One-line wrapper around fetch_county_permits('053') — Polk is Tier 2 Major. Per the emerging pattern Clackamas confirmed (Tier 1 Flagships run county-direct Accela tenants, Tier 2/3/4 ride state Accela), Polk jurisdictions — Dallas, Independence, Monmouth, Falls City, Willamina, and unincorporated Polk — all route through aca-oregon.accela.com/oregon. Brief reuse hypothesis VALIDATED — clean fetch_county_permits wrapper, not a county-direct Accela. IN FLIGHT — same deep-link-only pattern as Crook/Marion/Benton: scrape gated on viewstate capture / Playwright. FORMATTING: TERRA aesthetic. 🚧 emoji header. Surface jurisdiction ('Polk County — Oregon state Accela; Tier 2 reuse pattern'). Frame the deep link as 'one tap from the live state portal.'",
@@ -979,6 +1018,9 @@ LOCAL_TOOL_FUNCTIONS = {
     "fetch_tillamook_assessment": fetch_tillamook_assessment,
     "fetch_tillamook_records": fetch_tillamook_records,
     "fetch_tillamook_permits": fetch_tillamook_permits,
+    "fetch_lincoln_assessment": fetch_lincoln_assessment,
+    "fetch_lincoln_records": fetch_lincoln_records,
+    "fetch_lincoln_permits": fetch_lincoln_permits,
     "get_site_plans": get_site_plans,
     "get_ai_spend_today": get_ai_spend_today,
     "query_yakov_handoffs": query_yakov_handoffs,

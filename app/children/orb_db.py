@@ -835,6 +835,45 @@ COUNTY_REGISTRY = {
             LIMIT 1
         """,
     },
+    "041": {  # Lincoln (FIPS 41-041) — Tier 3 Standard, central coast (Newport / Lincoln City / Depoe Bay / Yachats)
+        "name": "Lincoln",
+        # bbox: central coast — Lincoln City/Otis N, Yachats/Tenmile Creek S,
+        # Pacific W, Coast-Range crest E. Measured extent (44.28, 45.05, -124.14,
+        # -123.60); padded. North edge meets Tillamook south — harmless overlap,
+        # ST_Contains on real geometry decides.
+        "bbox": (44.20, 45.10, -124.20, -123.50),
+        # THIN / Washington-pattern L1 — Lincoln runs no ArcGIS Server; the
+        # full-county taxlot21 cadastre ships geometry + taxlot + acreage only.
+        # owner_name / situs surface WHEN PRESENT (NULL now; the Newport-UGB
+        # enrichment backfills them). Acreage: COALESCE(NULLIF(taxlot_acres,0),
+        # geodesic) so ROAD parcels (0-acre) still report a sane number.
+        "query": """
+            SELECT taxlot,
+                   map_number AS section_id,
+                   ROUND(COALESCE(NULLIF(taxlot_acres, 0), (ST_Area(geom::geography) / 4046.8564224))::numeric, 3) AS acres,
+                   'https://www.co.lincoln.or.us/1000/Property-Information-Search-Page' AS county_url,
+                   map_number,
+                   COALESCE(
+                       NULLIF(CONCAT_WS(' & ',
+                                        NULLIF(owner_line1, ''),
+                                        NULLIF(owner_line2, ''),
+                                        NULLIF(owner_line3, '')), ''),
+                       owner_line1
+                   ) AS owner_name,
+                   CASE
+                       WHEN site_add_nam IS NULL OR site_add_nam = '' THEN NULL
+                       ELSE RTRIM(site_add_nam, ', ') || COALESCE(', ' || NULLIF(site_add_cty, ''), '')
+                   END AS situs_address,
+                   NULL::text AS zone_code,
+                   NULL::text AS zone_label,
+                   ST_AsText(ST_Centroid(geom)) AS parcel_centroid,
+                   'Lincoln'::text AS county_name,
+                   '041'::text AS county_fips
+            FROM parcels_lincoln
+            WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            LIMIT 1
+        """,
+    },
     # Jefferson (031) lands here when its L1 table exists.
 }
 
@@ -1374,6 +1413,9 @@ def fetch_crook_assessment(taxlot: str, force_refresh: bool = False) -> dict:
 # fetch_county_permits — counties NOT in this set get a structured response
 # saying the state portal won't have their permits, look elsewhere.
 _OREGON_EPERMITTING_FIPS = {
+    "041",  # Lincoln      — Tier 3 Standard central coast. All jurisdictions
+            #                (Newport / Lincoln City / Toledo / Waldport / Depoe Bay /
+            #                Yachats / Siletz / unincorporated) ride state Accela.
     "057",  # Tillamook    — Tier 3 Standard coastal. All jurisdictions (Tillamook /
             #                Garibaldi / Bay City / Rockaway Beach / Manzanita /
             #                Nehalem / Wheeler / Pacific City / unincorporated) ride
@@ -4671,4 +4713,17 @@ from .tillamook_terra import (  # noqa: E402
     fetch_tillamook_assessment,
     fetch_tillamook_records,
     fetch_tillamook_permits,
+)
+
+
+# =============================================================================
+# LINCOLN County L2/L3 (FIPS 041) — Tier 3 Standard, coastal cluster — re-exported
+# from lincoln_terra (separate module, same precedent). THIN / Washington-pattern
+# (cadastre L1; owner/situs/valuation IN FLIGHT until Newport-UGB enrichment).
+# Callers keep using `from .orb_db import fetch_lincoln_*`.
+# =============================================================================
+from .lincoln_terra import (  # noqa: E402
+    fetch_lincoln_assessment,
+    fetch_lincoln_records,
+    fetch_lincoln_permits,
 )
