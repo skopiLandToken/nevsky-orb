@@ -1,6 +1,6 @@
 from fastapi import Header, FastAPI, Request, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 import os
 from uuid import uuid4
@@ -73,6 +73,96 @@ app.add_middleware(
 @app.get("/robots.txt", include_in_schema=False)
 async def robots():
     return FileResponse("/app/robots.txt", media_type="text/plain")
+
+
+# ── SVOIcloud one-time QR onboarding (DOCTRINE-MP-ISOLATION-01) ──
+# Layer-1 onboarding: the MP opens this link (delivered via Sophia/Telegram), sees a
+# QR encoding the Nextcloud login-flow URI, and scans it in the Nextcloud mobile app.
+# Single-use + 24h expiry. The QR is rendered SERVER-SIDE as inline SVG so the app
+# password NEVER leaves the droplet (no third-party QR service).
+def _onboard_shell(title: str, body_html: str, status: int = 200) -> HTMLResponse:
+    html = (
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<meta name='robots' content='noindex,nofollow'>"
+        f"<title>{title}</title>"
+        "<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#0b1f33;"
+        "color:#eaf2fb;margin:0;padding:24px;display:flex;justify-content:center}"
+        ".card{max-width:460px;width:100%;background:#13314f;border-radius:16px;padding:28px;"
+        "box-shadow:0 8px 30px rgba(0,0,0,.35)}h1{font-size:20px;margin:0 0 8px}"
+        "p{line-height:1.5;color:#bcd2ea}ol{line-height:1.7;color:#dce8f6}"
+        ".qr{background:#fff;border-radius:12px;padding:16px;display:flex;justify-content:center;margin:18px 0}"
+        ".muted{font-size:13px;color:#8fb0d0}.store a{color:#7cc4ff;text-decoration:none}</style>"
+        f"</head><body><div class='card'>{body_html}</div></body></html>"
+    )
+    return HTMLResponse(html, status_code=status)
+
+
+@app.get("/svoicloud/onboard/{token}", include_in_schema=False)
+async def svoicloud_onboard(token: str):
+    from datetime import datetime, timezone
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT mp_slug, nc_user, nc_app_password, server_url, expires_at, used_at
+                       FROM svoicloud_onboard_tokens WHERE token=%s""",
+                    (token,),
+                )
+                row = cur.fetchone()
+    except Exception as e:
+        print(f"[svoicloud_onboard] lookup error: {e}")
+        return _onboard_shell("SVOIcloud", "<h1>Something went wrong</h1><p>Please contact support.</p>", 500)
+
+    if not row:
+        return _onboard_shell("SVOIcloud", "<h1>Invalid link</h1><p>This onboarding link isn’t recognized.</p>", 404)
+    mp_slug, nc_user, app_pw, server_url, expires_at, used_at = row
+    now = datetime.now(timezone.utc)
+    if used_at is not None:
+        return _onboard_shell("SVOIcloud", "<h1>Link already used</h1><p>This onboarding link was already opened. Contact support for a fresh link.</p>", 410)
+    if expires_at and expires_at < now:
+        return _onboard_shell("SVOIcloud", "<h1>Link expired</h1><p>This onboarding link has expired. Contact support for a fresh link.</p>", 410)
+
+    # First-use invalidation — atomic: only the first request flips used_at and proceeds.
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE svoicloud_onboard_tokens SET used_at=now() WHERE token=%s AND used_at IS NULL RETURNING id",
+                    (token,),
+                )
+                claimed = cur.fetchone()
+                conn.commit()
+    except Exception as e:
+        print(f"[svoicloud_onboard] claim error: {e}")
+        claimed = None
+    if not claimed:
+        return _onboard_shell("SVOIcloud", "<h1>Link already used</h1><p>This onboarding link was already opened.</p>", 410)
+
+    # Nextcloud login-flow URI the app's "Log in with QR code" expects.
+    login_uri = f"nc://login/user:{nc_user}&password:{app_pw}&server:{server_url}"
+    try:
+        import segno
+        qr_svg = segno.make(login_uri, error="m").svg_inline(scale=6, dark="#0b1f33")
+    except Exception as e:
+        print(f"[svoicloud_onboard] qr error: {e}")
+        qr_svg = "<p style='color:#13314f'>QR unavailable — use manual setup below.</p>"
+
+    body = (
+        "<h1>Welcome to your SVOIcloud</h1>"
+        f"<p>Your private space: <b>{server_url.replace('https://','')}</b></p>"
+        "<ol>"
+        "<li>Install the <b>Nextcloud</b> app "
+        "(<span class='store'><a href='https://apps.apple.com/app/nextcloud/id1125420102'>App Store</a></span> · "
+        "<span class='store'><a href='https://play.google.com/store/apps/details?id=com.nextcloud.client'>Google Play</a></span>).</li>"
+        "<li>Open the app → <b>Log in</b> → <b>Log in with QR code</b>.</li>"
+        "<li>Scan the code below.</li>"
+        "</ol>"
+        f"<div class='qr'>{qr_svg}</div>"
+        "<p class='muted'>This link is single-use and now spent — keep this tab open until you’ve scanned. "
+        f"Manual setup: server <b>{server_url}</b>, user <b>{nc_user}</b> (password is embedded in the QR only).</p>"
+    )
+    return _onboard_shell("SVOIcloud onboarding", body)
 
 
 class HealthResponse(BaseModel):
@@ -374,6 +464,63 @@ async def fire_pending_cpanel_delete_cards():
                 print(f"[cpanel_delete] card NOT delivered (id={pid}); will retry. resp={resp}")
         except Exception as e:
             print(f"[cpanel_delete] card send error (id={pid}): {e}")
+
+
+async def fire_pending_svoicloud_deprovision_cards():
+    """Sweep svoicloud_pending_deprovisions for pending rows still owing Iosif an
+    approval card and send each. DESTRUCTIVE-OP GATE (DOCTRINE-MP-ISOLATION-01):
+    Sophia's deprovision tool only enqueues; the host worker tears the stack down ONLY
+    after Iosif taps Approve (which flips the row to 'approved'). Mirrors
+    fire_pending_cpanel_delete_cards — card_sent decouples the enqueue from this async
+    send, marked sent only on confirmed Telegram delivery so a dropped card retries."""
+    iosif_id = os.environ.get("IOSIF_TELEGRAM_ID", "7583693994")
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id, mp_slug, requested_by, archive_to
+                       FROM svoicloud_pending_deprovisions
+                       WHERE status='pending' AND card_sent=false
+                       ORDER BY requested_at ASC"""
+                )
+                rows = cur.fetchall()
+    except Exception as e:
+        print(f"[svoicloud_deprov] fetch pending error: {e}")
+        return
+
+    def _md_safe(s):
+        return "".join(" " if c in "_*`[" else c for c in str(s or ""))
+
+    for row in rows:
+        pid, mp_slug, requested_by, archive_to = row[0], row[1], row[2], row[3]
+        text = (
+            "\U0001f5d1️ *SVOIcloud Teardown — Founder Approval Required*\n\n"
+            "DESTRUCTIVE. Permanently removes the partner's container, database, and "
+            "Wasabi storage bucket.\n\n"
+            f"☁️ Stack: *{_md_safe(mp_slug)}.cloud.skopi.io*\n"
+            f"\U0001f64b Requested by: {_md_safe(requested_by)}\n"
+            f"\U0001f4e6 Archive first: {_md_safe(archive_to) if archive_to else 'no'}\n\n"
+            "Approve → the worker tears it down now.\n"
+            "Deny → nothing is removed."
+        )
+        markup = {"inline_keyboard": [[
+            {"text": "✅ Approve teardown", "callback_data": f"svoicloud_deprov_approve:{pid}"},
+            {"text": "\U0001f6ab Deny", "callback_data": f"svoicloud_deprov_deny:{pid}"},
+        ]]}
+        try:
+            resp = await send_sophia_message_with_markup(int(iosif_id), text, markup)
+            if isinstance(resp, dict) and resp.get("ok"):
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE svoicloud_pending_deprovisions SET card_sent=true WHERE id=%s",
+                            (pid,),
+                        )
+                        conn.commit()
+            else:
+                print(f"[svoicloud_deprov] card NOT delivered (id={pid}); will retry. resp={resp}")
+        except Exception as e:
+            print(f"[svoicloud_deprov] card send error (id={pid}): {e}")
 
 
 
@@ -2207,6 +2354,10 @@ async def telegram_webhook(request: Request):
             await fire_pending_cpanel_delete_cards()
         except Exception as _cp_err:
             print(f"[unified_webhook sophia] cpanel card sweep error: {_cp_err}")
+        try:
+            await fire_pending_svoicloud_deprovision_cards()
+        except Exception as _sv_err:
+            print(f"[unified_webhook sophia] svoicloud card sweep error: {_sv_err}")
         return {"ok": True}
     # ── END SOPHIA ────────────────────────────────────────────────────
 
@@ -3119,6 +3270,75 @@ async def process_telegram_callback_query(callback_query: dict, response_bot_tok
         if callback_query_id:
             await answer_telegram_callback_query(callback_query_id, "Denied \U0001f6ab")
         return {"ok": True, "action": "cpanel_delete_denied", "email": target_email}
+
+    # ── SVOIcloud deprovision approval (DOCTRINE-MP-ISOLATION-01) ──
+    # Iosif taps Approve/Deny on the Sophia teardown card. data = svoicloud_deprov_(approve|deny):<id>.
+    # Unlike cpanel (delete inline), teardown is HOST work: Approve only flips the row to
+    # 'approved' and the svoicloud-worker daemon executes the destroy + bucket archive.
+    if action in ("svoicloud_deprov_approve", "svoicloud_deprov_deny"):
+        pid = reminder_id
+        if not pid:
+            if callback_query_id:
+                await answer_telegram_callback_query(callback_query_id, "No pending id.")
+            return {"ok": False, "reason": "missing_pending_id"}
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT mp_slug, status FROM svoicloud_pending_deprovisions WHERE id=%s",
+                        (pid,),
+                    )
+                    row = cur.fetchone()
+        except Exception as _e:
+            print(f"[svoicloud_deprov] load error: {_e}")
+            row = None
+        if not row:
+            if callback_query_id:
+                await answer_telegram_callback_query(callback_query_id, "Request not found.")
+            return {"ok": False, "reason": "pending_not_found"}
+        mp_slug, status = row[0], row[1]
+        if status != "pending":
+            if callback_query_id:
+                await answer_telegram_callback_query(callback_query_id, f"Already {status}.")
+            return {"ok": True, "already": status}
+        from_user = callback_query.get("from", {}) or {}
+        decider = str(from_user.get("id", ""))
+
+        if action == "svoicloud_deprov_approve":
+            try:
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """UPDATE svoicloud_pending_deprovisions
+                               SET status='approved', decided_at=now(), decided_by=%s WHERE id=%s""",
+                            (decider, pid),
+                        )
+                        conn.commit()
+            except Exception as _ue:
+                print(f"[svoicloud_deprov_approve] update error: {_ue}")
+            if chat_id:
+                await send_sophia_message(chat_id, f"✅ Teardown of *{mp_slug}.cloud.skopi.io* approved — the worker is removing it now (container, db, bucket). I'll confirm when it's gone.")
+            if callback_query_id:
+                await answer_telegram_callback_query(callback_query_id, "Approved ✅ — tearing down")
+            return {"ok": True, "action": "svoicloud_deprov_approved", "slug": mp_slug}
+
+        # deny
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE svoicloud_pending_deprovisions
+                           SET status='denied', decided_at=now(), decided_by=%s WHERE id=%s""",
+                        (decider, pid),
+                    )
+                    conn.commit()
+        except Exception as _e:
+            print(f"[svoicloud_deprov_deny] update error: {_e}")
+        if chat_id:
+            await send_sophia_message(chat_id, f"\U0001f6ab Teardown of *{mp_slug}.cloud.skopi.io* denied — nothing removed.")
+        if callback_query_id:
+            await answer_telegram_callback_query(callback_query_id, "Denied \U0001f6ab")
+        return {"ok": True, "action": "svoicloud_deprov_denied", "slug": mp_slug}
 
 
     # ── TERRA-FIELD-7C-2: parcel button callback handlers ──────────────
@@ -4377,6 +4597,10 @@ async def sophia_webhook(request: Request):
         await fire_pending_cpanel_delete_cards()
     except Exception as _cp_err:
         print(f"[sophia_webhook] cpanel card sweep error: {_cp_err}")
+    try:
+        await fire_pending_svoicloud_deprovision_cards()
+    except Exception as _sv_err:
+        print(f"[sophia_webhook] svoicloud card sweep error: {_sv_err}")
     return {"ok": True}
     # === END ENGINE ROUTING (sophia) ===
 

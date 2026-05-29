@@ -103,6 +103,15 @@ from integrations.cpanel import (
     sophia_rotate_mailbox_password,
     sophia_delete_mailbox,
 )
+# SVOIcloud per-MP isolated stacks (DOCTRINE-MP-ISOLATION-01). Write/control-plane
+# surface like cpanel — imported directly here, NOT routed through read-only orb_db.
+# These tools only ENQUEUE; the host daemon scripts/svoicloud_worker.py executes.
+from integrations.svoicloud_provisioner import (
+    sophia_provision_mp_stack,
+    sophia_deprovision_mp_stack,
+    sophia_list_mp_stacks,
+    sophia_mp_stack_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +203,10 @@ TIER_TOOLS = {
         "sophia_list_mailboxes",
         "sophia_rotate_mailbox_password",
         "sophia_delete_mailbox",
+        "sophia_provision_mp_stack",
+        "sophia_deprovision_mp_stack",
+        "sophia_list_mp_stacks",
+        "sophia_mp_stack_status",
     ],
     "executive": [
         # C-suite (Ophelia, future C-suite). Cant see honeypot or full users list.
@@ -1108,6 +1121,48 @@ ALL_TOOL_SCHEMAS = {
             "required": ["email"]
         }
     },
+    "sophia_provision_mp_stack": {
+        "name": "sophia_provision_mp_stack",
+        "description": "SOVEREIGN ONLY. Provision a new isolated SVOIcloud space for a Marketing Partner — its own Nextcloud + Postgres + Redis container, isolated network, and a dedicated Wasabi storage bucket (DOCTRINE-MP-ISOLATION-01: cross-MP visibility impossible by design). Use when Iosif onboards an MP and wants them a private cloud workspace at <slug>.cloud.skopi.io. This QUEUES the build (async, ~60-90s) and returns immediately; when it's live I deliver the admin password + a one-time QR onboarding link to Iosif via Telegram — NEVER in chat. `mp_slug` must be a clean DNS label (lowercase a-z/0-9/hyphen). Returns ok/queued/url. Audit-logged.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "mp_slug": {"type": "string", "description": "DNS-safe slug, becomes <slug>.cloud.skopi.io, e.g. 'arturo'."},
+                "owner_email": {"type": "string", "description": "Optional MP contact email."},
+                "owner_telegram_id": {"type": "integer", "description": "Optional MP Telegram id (for direct onboarding delivery later)."},
+                "display_name": {"type": "string", "description": "Optional human display name for the MP."}
+            },
+            "required": ["mp_slug"]
+        }
+    },
+    "sophia_deprovision_mp_stack": {
+        "name": "sophia_deprovision_mp_stack",
+        "description": "SOVEREIGN ONLY. Request DESTRUCTIVE teardown of an MP's SVOIcloud (removes its container, database, and Wasabi bucket). GATED: does NOT tear down immediately — it queues the request and fires an approval card to Iosif via Telegram; teardown runs only after he taps Approve. Optionally `archive_to` a backup bucket first. Returns ok/pending=true. Always tell the user it's pending Iosif's confirmation; never claim it's done. Audit-logged on execution.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "mp_slug": {"type": "string", "description": "Slug of the MP stack to tear down."},
+                "archive_to": {"type": "string", "description": "Optional backup bucket name to archive the MP's files to (backup region) before deletion."}
+            },
+            "required": ["mp_slug"]
+        }
+    },
+    "sophia_list_mp_stacks": {
+        "name": "sophia_list_mp_stacks",
+        "description": "SOVEREIGN ONLY. List all provisioned SVOIcloud MP stacks with their status (queued/provisioning/active/deprovisioned/failed), URL, and Wasabi bucket. Use when Iosif asks which partner clouds exist or to confirm a provision/teardown. Returns ok/count/stacks. Read-only.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    "sophia_mp_stack_status": {
+        "name": "sophia_mp_stack_status",
+        "description": "SOVEREIGN ONLY. Detailed status/health for one MP SVOIcloud: current state, URL, Wasabi bucket, admin user, last error, and the recent provisioning log. Use to diagnose a stuck or failed provision. Returns ok/status/recent_log. Read-only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "mp_slug": {"type": "string", "description": "Slug of the MP stack to inspect."}
+            },
+            "required": ["mp_slug"]
+        }
+    },
 }
 
 LOCAL_TOOL_FUNCTIONS = {
@@ -1184,6 +1239,10 @@ LOCAL_TOOL_FUNCTIONS = {
     "sophia_list_mailboxes": sophia_list_mailboxes,
     "sophia_rotate_mailbox_password": sophia_rotate_mailbox_password,
     "sophia_delete_mailbox": sophia_delete_mailbox,
+    "sophia_provision_mp_stack": sophia_provision_mp_stack,
+    "sophia_deprovision_mp_stack": sophia_deprovision_mp_stack,
+    "sophia_list_mp_stacks": sophia_list_mp_stacks,
+    "sophia_mp_stack_status": sophia_mp_stack_status,
 }
 
 
