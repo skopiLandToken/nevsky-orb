@@ -285,7 +285,12 @@ def wait_nextcloud_ready(slug, port, timeout=180):
 
 
 def occ(slug, args, check=True, env=None):
-    return run(["docker", "exec", "-u", "www-data", f"mp-{slug}-app", "php", "occ", *args],
+    # `-e KEY` (no value) makes docker forward KEY from THIS process's env into the
+    # container — so secrets (e.g. NC_PASS) reach occ without ever landing in argv/logs.
+    eflags = []
+    for k in (env or {}):
+        eflags += ["-e", k]
+    return run(["docker", "exec", *eflags, "-u", "www-data", f"mp-{slug}-app", "php", "occ", *args],
                check=check, env=env)
 
 
@@ -299,7 +304,7 @@ def install_default_apps(slug):
 def make_app_password(slug, user, login_pw):
     """occ user:add-app-password generates a revocable app token for QR login."""
     rc, out, err = occ(slug, ["user:add-app-password", user, "--password-from-env"],
-                       check=False, env={"OC_PASS": login_pw})
+                       check=False, env={"NC_PASS": login_pw})
     m = re.search(r"(?:token|password).*?:\s*([A-Za-z0-9]{10,})", out, re.I)
     if rc == 0 and m:
         return m.group(1)
