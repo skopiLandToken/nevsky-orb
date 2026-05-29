@@ -321,6 +321,62 @@ async def fire_pending_founder_private_cards(child_canonical_name: str = "lilith
             print(f"[founder_private] card send error (req={req_id}): {e}")
 
 
+async def fire_pending_cpanel_delete_cards():
+    """Sweep cpanel_pending_deletes for pending rows still owing Iosif an approval
+    card and send each. DESTRUCTIVE-OP GATE (DOCTRINE-MAILBOX-PROVISIONING-01):
+    Sophia's delete tool only enqueues — the mailbox is removed solely on Iosif's tap.
+    Mirrors fire_pending_founder_private_cards: card_sent decouples the engine write
+    from this async send, and we mark sent only on confirmed Telegram delivery so a
+    dropped card retries on the next Sophia turn."""
+    iosif_id = os.environ.get("IOSIF_TELEGRAM_ID", "7583693994")
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id, target_email, requested_by
+                       FROM cpanel_pending_deletes
+                       WHERE status='pending' AND card_sent=false
+                       ORDER BY requested_at ASC"""
+                )
+                rows = cur.fetchall()
+    except Exception as e:
+        print(f"[cpanel_delete] fetch pending error: {e}")
+        return
+
+    def _md_safe(s):
+        return "".join(" " if c in "_*`[" else c for c in str(s or ""))
+
+    for row in rows:
+        pid, target_email, requested_by = row[0], row[1], row[2]
+        text = (
+            "\U0001f5d1\ufe0f *Mailbox Deletion \u2014 Founder Approval Required*\n\n"
+            "DESTRUCTIVE. This permanently removes the mailbox and its stored mail.\n\n"
+            f"\U0001f4ed Mailbox: *{_md_safe(target_email)}*\n"
+            f"\U0001f64b Requested by: {_md_safe(requested_by)}\n\n"
+            "Approve \u2192 the mailbox is deleted on GreenGeeks now.\n"
+            "Deny \u2192 nothing is deleted."
+        )
+        markup = {"inline_keyboard": [[
+            {"text": "\u2705 Approve delete", "callback_data": f"cpanel_del_approve:{pid}"},
+            {"text": "\U0001f6ab Deny", "callback_data": f"cpanel_del_deny:{pid}"},
+        ]]}
+        try:
+            resp = await send_sophia_message_with_markup(int(iosif_id), text, markup)
+            if isinstance(resp, dict) and resp.get("ok"):
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE cpanel_pending_deletes SET card_sent=true WHERE id=%s",
+                            (pid,),
+                        )
+                        conn.commit()
+            else:
+                print(f"[cpanel_delete] card NOT delivered (id={pid}); will retry. resp={resp}")
+        except Exception as e:
+            print(f"[cpanel_delete] card send error (id={pid}): {e}")
+
+
+
 # === YINDO BRIDGE HELPERS (2026-05-27) ===
 # Yindo is the Telegram interface to host-side Claude Code. Same Yakov, different
 # interface (see CLAUDE.md "One Yakov, multiple interfaces"). The FastAPI app only
@@ -2147,6 +2203,10 @@ async def telegram_webhook(request: Request):
         except Exception as _engine_err:
             print(f"[unified_webhook sophia] engine error: {_engine_err}")
             await send_sophia_message(chat_id, "Sophia hit an internal error. Yakov has been logged.")
+        try:
+            await fire_pending_cpanel_delete_cards()
+        except Exception as _cp_err:
+            print(f"[unified_webhook sophia] cpanel card sweep error: {_cp_err}")
         return {"ok": True}
     # ── END SOPHIA ────────────────────────────────────────────────────
 
@@ -2981,6 +3041,85 @@ async def process_telegram_callback_query(callback_query: dict, response_bot_tok
         if callback_query_id:
             await answer_telegram_callback_query(callback_query_id, "Denied 🚫 — withheld.")
         return {"ok": True, "action": "denied", "request_id": str(req_id)}
+
+    # \u2500\u2500 cPanel mailbox delete approval (DOCTRINE-MAILBOX-PROVISIONING-01) \u2500\u2500
+    # Iosif taps Approve/Deny on the Sophia delete card. data = cpanel_del_(approve|deny):<id>.
+    if action in ("cpanel_del_approve", "cpanel_del_deny"):
+        pid = reminder_id
+        if not pid:
+            if callback_query_id:
+                await answer_telegram_callback_query(callback_query_id, "No pending id.")
+            return {"ok": False, "reason": "missing_pending_id"}
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT target_email, status FROM cpanel_pending_deletes WHERE id=%s",
+                        (pid,),
+                    )
+                    row = cur.fetchone()
+        except Exception as _e:
+            print(f"[cpanel_del] load error: {_e}")
+            row = None
+        if not row:
+            if callback_query_id:
+                await answer_telegram_callback_query(callback_query_id, "Request not found.")
+            return {"ok": False, "reason": "pending_not_found"}
+        target_email, status = row[0], row[1]
+        if status != "pending":
+            if callback_query_id:
+                await answer_telegram_callback_query(callback_query_id, f"Already {status}.")
+            return {"ok": True, "already": status}
+        from_user = callback_query.get("from", {}) or {}
+        decider = str(from_user.get("id", ""))
+
+        if action == "cpanel_del_approve":
+            ok, err = True, None
+            try:
+                from integrations.cpanel import delete_mailbox
+                delete_mailbox(target_email, invoked_by="iosif")
+            except Exception as _de:
+                ok, err = False, str(_de)
+                print(f"[cpanel_del_approve] delete error: {_de}")
+            try:
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """UPDATE cpanel_pending_deletes
+                               SET status=%s, decided_at=now(), decided_by=%s, error_message=%s
+                               WHERE id=%s""",
+                            ("executed" if ok else "failed", decider, err, pid),
+                        )
+                        conn.commit()
+            except Exception as _ue:
+                print(f"[cpanel_del_approve] status update error: {_ue}")
+            if chat_id:
+                if ok:
+                    await send_sophia_message(chat_id, f"\u2705 Deleted *{target_email}* from GreenGeeks. (Audit-logged.)")
+                else:
+                    await send_sophia_message(chat_id, f"\u26a0\ufe0f Delete of *{target_email}* FAILED: {err}. Nothing was removed \u2014 check the logs.")
+            if callback_query_id:
+                await answer_telegram_callback_query(callback_query_id, "Deleted \u2705" if ok else "Delete failed \u26a0\ufe0f")
+            return {"ok": ok, "action": "cpanel_deleted", "email": target_email}
+
+        # deny
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE cpanel_pending_deletes
+                           SET status='denied', decided_at=now(), decided_by=%s WHERE id=%s""",
+                        (decider, pid),
+                    )
+                    conn.commit()
+        except Exception as _e:
+            print(f"[cpanel_del_deny] update error: {_e}")
+        if chat_id:
+            await send_sophia_message(chat_id, f"\U0001f6ab Deletion of *{target_email}* denied \u2014 nothing removed.")
+        if callback_query_id:
+            await answer_telegram_callback_query(callback_query_id, "Denied \U0001f6ab")
+        return {"ok": True, "action": "cpanel_delete_denied", "email": target_email}
+
 
     # ── TERRA-FIELD-7C-2: parcel button callback handlers ──────────────
     if action.startswith("parcel_") and _TERRA_DIAL_AVAILABLE:
@@ -4234,6 +4373,10 @@ async def sophia_webhook(request: Request):
         except Exception as _engine_err:
             print(f"[sophia_webhook] engine error: {_engine_err}")
             await send_sophia_message(chat_id, "Sophia hit an internal error. Yakov has been logged.")
+    try:
+        await fire_pending_cpanel_delete_cards()
+    except Exception as _cp_err:
+        print(f"[sophia_webhook] cpanel card sweep error: {_cp_err}")
     return {"ok": True}
     # === END ENGINE ROUTING (sophia) ===
 

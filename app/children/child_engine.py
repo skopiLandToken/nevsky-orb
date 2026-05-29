@@ -94,6 +94,15 @@ from .orb_db import (
     fetch_jefferson_permits,
     calculate_lot_yield,
 )
+# cPanel mailbox provisioning (DOCTRINE-MAILBOX-PROVISIONING-01). NOT routed through
+# orb_db: orb_db is read-only by design; cPanel is a write/control-plane surface, so it
+# lives in its own integrations module and is imported directly here.
+from integrations.cpanel import (
+    sophia_provision_mailbox,
+    sophia_list_mailboxes,
+    sophia_rotate_mailbox_password,
+    sophia_delete_mailbox,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +190,10 @@ TIER_TOOLS = {
         "query_yakov_commits",
         "calculate_lot_yield",
         "web_search",
+        "sophia_provision_mailbox",
+        "sophia_list_mailboxes",
+        "sophia_rotate_mailbox_password",
+        "sophia_delete_mailbox",
     ],
     "executive": [
         # C-suite (Ophelia, future C-suite). Cant see honeypot or full users list.
@@ -1049,6 +1062,52 @@ ALL_TOOL_SCHEMAS = {
             }
         }
     },
+    "sophia_provision_mailbox": {
+        "name": "sophia_provision_mailbox",
+        "description": "SOVEREIGN ONLY. Provision (create) a new email mailbox on the SKOpi cPanel/GreenGeeks account via Nevsky. Use when Iosif onboards a C-level / Marketing Partner / employee and needs a working inbox in seconds. `email` may be a full address (jgale@skopi.io) or a bare local part (defaults to skopi.io). If `password` is omitted, a strong one is generated and returned — RELAY IT TO IOSIF ONLY (Telegram), never to anyone else. `quota_mb=0` means unlimited. Returns ok/email/password/quota_label. On failure returns ok=false with the cPanel error. Every call is audit-logged.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "email": {"type": "string", "description": "Mailbox address or local part, e.g. 'jgale@skopi.io' or 'jgale'."},
+                "password": {"type": "string", "description": "Optional. Omit to auto-generate a strong password (returned for Iosif)."},
+                "quota_mb": {"type": "integer", "default": 0, "description": "Mailbox quota in MB. 0 = unlimited."}
+            },
+            "required": ["email"]
+        }
+    },
+    "sophia_list_mailboxes": {
+        "name": "sophia_list_mailboxes",
+        "description": "SOVEREIGN ONLY. List the email mailboxes on the SKOpi cPanel account, optionally filtered to one domain. Use when Iosif asks what inboxes exist, who has email, or to confirm a mailbox was created/deleted. Returns ok/count/mailboxes (each with email + suspended flags). Audit-logged.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "domain": {"type": "string", "description": "Optional domain filter, e.g. 'skopi.io'. Omit for all domains."}
+            }
+        }
+    },
+    "sophia_rotate_mailbox_password": {
+        "name": "sophia_rotate_mailbox_password",
+        "description": "SOVEREIGN ONLY. Rotate (change) the password for an existing SKOpi mailbox. Use when a credential is compromised or on routine rotation. If `new_password` is omitted, a strong one is generated and returned — RELAY IT TO IOSIF ONLY. The old password stops working immediately. Returns ok/email/password. On failure returns ok=false. Audit-logged.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "email": {"type": "string", "description": "Mailbox address or local part."},
+                "new_password": {"type": "string", "description": "Optional. Omit to auto-generate a strong password (returned for Iosif)."}
+            },
+            "required": ["email"]
+        }
+    },
+    "sophia_delete_mailbox": {
+        "name": "sophia_delete_mailbox",
+        "description": "SOVEREIGN ONLY. Request DELETION of a SKOpi mailbox. DESTRUCTIVE and GATED: this does NOT delete immediately — it queues the request and fires an approval card to Iosif via Telegram. The mailbox is removed only after Iosif taps Approve. Returns ok/pending=true/message. Always tell the user the deletion is pending Iosif's confirmation; never claim it was deleted. Audit-logged on execution.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "email": {"type": "string", "description": "Mailbox address or local part to delete."}
+            },
+            "required": ["email"]
+        }
+    },
 }
 
 LOCAL_TOOL_FUNCTIONS = {
@@ -1121,6 +1180,10 @@ LOCAL_TOOL_FUNCTIONS = {
     "fetch_jefferson_records": fetch_jefferson_records,
     "fetch_jefferson_permits": fetch_jefferson_permits,
     "calculate_lot_yield": calculate_lot_yield,
+    "sophia_provision_mailbox": sophia_provision_mailbox,
+    "sophia_list_mailboxes": sophia_list_mailboxes,
+    "sophia_rotate_mailbox_password": sophia_rotate_mailbox_password,
+    "sophia_delete_mailbox": sophia_delete_mailbox,
 }
 
 
