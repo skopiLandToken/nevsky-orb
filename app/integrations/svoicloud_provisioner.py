@@ -41,10 +41,13 @@ logger = logging.getLogger("svoicloud")
 
 DB_DSN = os.environ.get("DATABASE_URL", "postgresql://nevsky:change_me_now@postgres:5432/nevsky_dev")
 
-BASE_DOMAIN = os.getenv("SVOICLOUD_BASE_DOMAIN", "cloud.skopi.io")
+# Primary brand domain is svoicloud.skopi.io (DOCTRINE-SVOICLOUD-DOMAIN-01, 2026-05-28).
+# cloud.skopi.io remains a working alias (same wildcard cert + nginx server_name), so any
+# legacy <slug>.cloud.skopi.io reference still resolves — only the default we hand out changed.
+BASE_DOMAIN = os.getenv("SVOICLOUD_BASE_DOMAIN", "svoicloud.skopi.io")
 
 # Slugs that would collide with platform/base hostnames or look like an attack.
-RESERVED_SLUGS = {"www", "admin", "api", "root", "mail", "cloud", "office",
+RESERVED_SLUGS = {"www", "admin", "api", "root", "mail", "cloud", "svoicloud", "office",
                   "nevsky", "analytics", "onlyoffice", "sophia", "wildcard"}
 
 # Stack states that mean "this slug is taken" — re-provision is only allowed once a
@@ -62,7 +65,7 @@ def _conn():
 
 def validate_slug(slug: str) -> str:
     """DNS-label-safe, lowercased. Reject anything that isn't a clean single label —
-    it becomes <slug>.cloud.skopi.io, a docker project name, and a bucket suffix, so
+    it becomes <slug>.svoicloud.skopi.io, a docker project name, and a bucket suffix, so
     garbage here is garbage in three blast radii."""
     s = (slug or "").strip().lower()
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,28}[a-z0-9])?", s):

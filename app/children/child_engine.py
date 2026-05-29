@@ -1123,11 +1123,11 @@ ALL_TOOL_SCHEMAS = {
     },
     "sophia_provision_mp_stack": {
         "name": "sophia_provision_mp_stack",
-        "description": "SOVEREIGN ONLY. Provision a new isolated SVOIcloud space for a Marketing Partner — its own Nextcloud + Postgres + Redis container, isolated network, and a dedicated Wasabi storage bucket (DOCTRINE-MP-ISOLATION-01: cross-MP visibility impossible by design). Use when Iosif onboards an MP and wants them a private cloud workspace at <slug>.cloud.skopi.io. This QUEUES the build (async, ~60-90s) and returns immediately; when it's live I deliver the admin password + a one-time QR onboarding link to Iosif via Telegram — NEVER in chat. `mp_slug` must be a clean DNS label (lowercase a-z/0-9/hyphen). Returns ok/queued/url. Audit-logged.",
+        "description": "SOVEREIGN ONLY. Provision a new isolated SVOIcloud space for a Marketing Partner — its own Nextcloud + Postgres + Redis container, isolated network, and a dedicated Wasabi storage bucket (DOCTRINE-MP-ISOLATION-01: cross-MP visibility impossible by design). Use when Iosif onboards an MP and wants them a private cloud workspace at <slug>.svoicloud.skopi.io. This QUEUES the build (async, ~60-90s) and returns immediately; when it's live I deliver the admin password + a one-time QR onboarding link to Iosif via Telegram — NEVER in chat. `mp_slug` must be a clean DNS label (lowercase a-z/0-9/hyphen). Returns ok/queued/url. Audit-logged.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "mp_slug": {"type": "string", "description": "DNS-safe slug, becomes <slug>.cloud.skopi.io, e.g. 'arturo'."},
+                "mp_slug": {"type": "string", "description": "DNS-safe slug, becomes <slug>.svoicloud.skopi.io, e.g. 'arturo'."},
                 "owner_email": {"type": "string", "description": "Optional MP contact email."},
                 "owner_telegram_id": {"type": "integer", "description": "Optional MP Telegram id (for direct onboarding delivery later)."},
                 "display_name": {"type": "string", "description": "Optional human display name for the MP."}

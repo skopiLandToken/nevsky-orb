@@ -497,7 +497,7 @@ async def fire_pending_svoicloud_deprovision_cards():
             "\U0001f5d1️ *SVOIcloud Teardown — Founder Approval Required*\n\n"
             "DESTRUCTIVE. Permanently removes the partner's container, database, and "
             "Wasabi storage bucket.\n\n"
-            f"☁️ Stack: *{_md_safe(mp_slug)}.cloud.skopi.io*\n"
+            f"☁️ Stack: *{_md_safe(mp_slug)}.svoicloud.skopi.io*\n"
             f"\U0001f64b Requested by: {_md_safe(requested_by)}\n"
             f"\U0001f4e6 Archive first: {_md_safe(archive_to) if archive_to else 'no'}\n\n"
             "Approve → the worker tears it down now.\n"
@@ -3317,7 +3317,7 @@ async def process_telegram_callback_query(callback_query: dict, response_bot_tok
             except Exception as _ue:
                 print(f"[svoicloud_deprov_approve] update error: {_ue}")
             if chat_id:
-                await send_sophia_message(chat_id, f"✅ Teardown of *{mp_slug}.cloud.skopi.io* approved — the worker is removing it now (container, db, bucket). I'll confirm when it's gone.")
+                await send_sophia_message(chat_id, f"✅ Teardown of *{mp_slug}.svoicloud.skopi.io* approved — the worker is removing it now (container, db, bucket). I'll confirm when it's gone.")
             if callback_query_id:
                 await answer_telegram_callback_query(callback_query_id, "Approved ✅ — tearing down")
             return {"ok": True, "action": "svoicloud_deprov_approved", "slug": mp_slug}
@@ -3335,7 +3335,7 @@ async def process_telegram_callback_query(callback_query: dict, response_bot_tok
         except Exception as _e:
             print(f"[svoicloud_deprov_deny] update error: {_e}")
         if chat_id:
-            await send_sophia_message(chat_id, f"\U0001f6ab Teardown of *{mp_slug}.cloud.skopi.io* denied — nothing removed.")
+            await send_sophia_message(chat_id, f"\U0001f6ab Teardown of *{mp_slug}.svoicloud.skopi.io* denied — nothing removed.")
         if callback_query_id:
             await answer_telegram_callback_query(callback_query_id, "Denied \U0001f6ab")
         return {"ok": True, "action": "svoicloud_deprov_denied", "slug": mp_slug}
