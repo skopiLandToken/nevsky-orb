@@ -75,6 +75,9 @@ from .orb_db import (
     fetch_columbia_assessment,
     fetch_columbia_records,
     fetch_columbia_permits,
+    fetch_baker_assessment,
+    fetch_baker_records,
+    fetch_baker_permits,
     fetch_douglas_assessment,
     fetch_douglas_records,
     fetch_douglas_permits,
@@ -186,6 +189,9 @@ TIER_TOOLS = {
         "fetch_columbia_assessment",
         "fetch_columbia_records",
         "fetch_columbia_permits",
+        "fetch_baker_assessment",
+        "fetch_baker_records",
+        "fetch_baker_permits",
         "fetch_douglas_assessment",
         "fetch_douglas_records",
         "fetch_douglas_permits",
@@ -264,6 +270,9 @@ TIER_TOOLS = {
         "fetch_columbia_assessment",
         "fetch_columbia_records",
         "fetch_columbia_permits",
+        "fetch_baker_assessment",
+        "fetch_baker_records",
+        "fetch_baker_permits",
         "fetch_douglas_assessment",
         "fetch_douglas_records",
         "fetch_douglas_permits",
@@ -889,6 +898,36 @@ ALL_TOOL_SCHEMAS = {
             "required": ["taxlot"]
         }
     },
+    "fetch_baker_assessment": {
+        "name": "fetch_baker_assessment",
+        "description": "TERRA: Fetch the Baker County taxlot snapshot for a parcel (Baker City / Haines / Halfway / Huntington / Sumpter / Unity / Richland / unincorporated NE-Oregon high-desert ranch + EFU + forest). Use when the user asks about a Baker County parcel — far northeast Oregon, Powder River valley + Elkhorn/Wallowa-Whitman forest country. THIN BY SOURCE — flag honestly, this is the ODOT-ames cohort: Baker has NO queryable county-direct GIS and the ODF statewide layer is display-only, so the ONLY queryable taxlot source is ODOT's statewide 'ames' cadastral (maintained for road/right-of-way mapping). It ships geometry + taxlot identity ONLY — maptaxlot, map_number, map_taxlot_short, effective_year — plus acreage COMPUTED from the official polygon (geodesic ST_Area) and the parcel centroid. There is NO owner, NO situs, NO valuation, NO property class in the source, and for a county Baker's size that assessor data is NOT in any free public layer (it lives behind the Baker County Assessor Property Search, one parcel at a time). owner/situs/valuation are returned as null and listed in in_flight — NEVER fabricate them. FORMATTING: TERRA aesthetic. 🗺️ emoji header (cadastral, not a full vault reveal). Lead with identity (maptaxlot / map_number) + 🌍 computed acreage + 📍 centroid. Then state plainly that owner / situs / valuation are not in the public Baker source and route the broker to the assessor_home + ormap_viewer deep links to pull ownership + value by map/taxlot. Never apologize, never invent.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Baker MapTaxlot (e.g. '06S38E00300') or the short Taxlot lot suffix."},
+                "force_refresh": {"type": "boolean", "default": False, "description": "No-op — Baker is a SQL pass-through over the ODOT cadastral ingest."}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_baker_records": {
+        "name": "fetch_baker_records",
+        "description": "TERRA: Fetch the Baker County recording hand-off for a taxlot. Confirms the taxlot exists in the ODOT cadastral and routes to the Baker County Clerk for the chain of title. THIN — the ODOT source carries NO instrument/deed data, so latest_instrument and owner_of_record are null (IN FLIGHT) and there is no per-parcel recordings API for Baker. NEVER fabricate an instrument. FORMATTING: TERRA aesthetic. 📜 emoji header. State that recorded deeds + owner of record are not in the public Baker source, and surface the clerk_home deep link as the chain-of-title hand-off.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_baker_permits": {
+        "name": "fetch_baker_permits",
+        "description": "TERRA: Fetch building permits for a Baker County parcel via Oregon's state ePermitting portal (Accela ACA). One-line wrapper around fetch_county_permits('001') — Baker is a small rural county routing through aca-oregon.accela.com/oregon (Baker City / Haines / Halfway / Huntington / Sumpter / Unity / unincorporated); no Baker-direct Accela tenant. IN FLIGHT — same deep-link-only pattern as the state-Accela cohort: scrape gated on viewstate capture / Playwright; returns the verified Accela deep link. FORMATTING: TERRA aesthetic. 🚧 emoji header. Surface jurisdiction ('Baker County — Oregon state Accela'). Frame the deep link as 'one tap from the live state portal.'",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
     "fetch_douglas_assessment": {
         "name": "fetch_douglas_assessment",
         "description": "TERRA: Fetch the Douglas County assessment + ownership + zoning + timber snapshot for a taxlot (Roseburg / Sutherlin / Winston / Myrtle Creek / Canyonville / Reedsport / Drain / Yoncalla / Oakland / Glendale / Riddle / unincorporated). Use when the user asks about a Douglas County parcel — Southern Oregon I-5 corridor between Eugene and Medford, with major timber + agricultural acreage. Douglas's public Parcels FeatureServer is MARION-RICH plus richer than Polk: source ships joined parcel + account attrs in ONE row — owner_name (NAME, 350 char), full mailing block (addr1/2/3 + csz), situs (address + csz), account family (taxid + prop_id + alt_acctnum + owner_id), property class (PROPCLASS — 9xx prefix = forest / timber / O&C grant land), full valuation breakdown (assessed + RMV land + RMV imp + RMV total — RICHER than Polk which only ships assessed), acreage (account-of-record + material + total/GIS), latest instrument (inst_no + sale_date), legal description (unbounded). NO scraper, NO viewstate gating, NO HTTP per call — pure SQL pass-through over parcels_douglas + spatial join against douglas_zoning (DC_ZONE — F1/F2/F3/FF/FG = forest variants, AW = agricultural watershed / EFU equivalent, R1-R3/RR residential, C1-C3 commercial, M1-M3 industrial). TIMBER MP SIGNAL: returns a structured `timber` block flagging forest-class (PROPCLASS 9xx) + forest-zone (DC_ZONE F-prefix) parcels — TIMBER-LAND MARKETING PARTNER differentiator per KB_75 / TERRA-CLOSER-01. IN FLIGHT — flag honestly: multi-year tax payment history (Orion Taxlot Information deep-links are session-gated); full chain of title (Clerk recordings session-gated); building details (year built / sqft / bed / bath — not on the Parcels FeatureServer). FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (👤 OWNER / 🏠 SITUS / 🧾 ACCOUNT / 🏘️ ZONING / 🌲 TIMBER if timber_mp_signal=true / 💰 VALUATION / 🌍 ACREAGE / 📜 LATEST INSTRUMENT / 🔗 DEEP LINKS). Surface RMV total + assessed prominently in 💰 VALUATION (call out the RMV/assessed split — Douglas ships both, unlike Polk). When `timber.timber_mp_signal=true`, ADD a 🌲 TIMBER section that names the forest PROPCLASS and/or forest DC_ZONE — this is the differentiating fact for the timber MP angle. End with assessment_search + gis_viewer deep links as broker hand-off.",
@@ -1254,6 +1293,9 @@ LOCAL_TOOL_FUNCTIONS = {
     "fetch_columbia_assessment": fetch_columbia_assessment,
     "fetch_columbia_records": fetch_columbia_records,
     "fetch_columbia_permits": fetch_columbia_permits,
+    "fetch_baker_assessment": fetch_baker_assessment,
+    "fetch_baker_records": fetch_baker_records,
+    "fetch_baker_permits": fetch_baker_permits,
     "fetch_douglas_assessment": fetch_douglas_assessment,
     "fetch_douglas_records": fetch_douglas_records,
     "fetch_douglas_permits": fetch_douglas_permits,

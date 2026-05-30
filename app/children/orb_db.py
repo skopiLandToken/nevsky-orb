@@ -590,6 +590,33 @@ COUNTY_REGISTRY = {
             FROM hit h
         """,
     },
+    "001": {  # Baker (FIPS 41-001) — NE Oregon, Powder River / Baker City. THIN (ODOT ames cadastral)
+        "name": "Baker",
+        # bbox: Baker County, far NE Oregon — Baker City (seat), Haines, Halfway,
+        # Huntington, Sumpter, Unity, Richland + unincorporated high-desert ranch /
+        # EFU / forest. Padded; tighten from ST_Extent after ingest.
+        "bbox": (44.20, 45.15, -118.55, -116.70),
+        # ODOT ames cadastral ships geometry + taxlot identity only — NO owner, NO
+        # situs, NO valuation. Resolver returns taxlot + map_number + acreage COMPUTED
+        # from the polygon; owner_name / situs stay NULL (honest, not fabricated).
+        "query": """
+            SELECT taxlot,
+                   map_number AS section_id,
+                   ROUND((ST_Area(geom::geography) / 4046.8564224)::numeric, 3) AS acres,
+                   'https://www.bakercountyor.gov/departments/assessor.php' AS county_url,
+                   map_number,
+                   NULL::text AS owner_name,
+                   NULL::text AS situs_address,
+                   NULL::text AS zone_code,
+                   NULL::text AS zone_label,
+                   ST_AsText(ST_Centroid(geom)) AS parcel_centroid,
+                   'Baker'::text AS county_name,
+                   '001'::text AS county_fips
+            FROM parcels_baker
+            WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            LIMIT 1
+        """,
+    },
     "009": {  # Columbia (FIPS 41-009) — NW Oregon, lower Columbia River. St. Helens / Scappoose / Rainier / Clatskanie / Vernonia
         "name": "Columbia",
         # bbox: Columbia spans the lower Columbia River from the Multnomah/Sauvie
@@ -1478,6 +1505,10 @@ def fetch_crook_assessment(taxlot: str, force_refresh: bool = False) -> dict:
 # fetch_county_permits — counties NOT in this set get a structured response
 # saying the state portal won't have their permits, look elsewhere.
 _OREGON_EPERMITTING_FIPS = {
+    "001",  # Baker        — small rural county; rides Oregon state ePermitting
+            #                (aca-oregon.accela.com/oregon). Baker City + Haines /
+            #                Halfway / Huntington / Sumpter / Unity / unincorporated.
+            #                Verify per-build; no Baker-direct Accela tenant found.
     "009",  # Columbia     — confirmed via columbiacountyor.gov/departments/Building:
             #                structural / plumbing / mechanical / electrical applied
             #                online through the State of Oregon ePermitting portal
@@ -4485,6 +4516,19 @@ from .columbia_terra import (
     fetch_columbia_assessment,
     fetch_columbia_records,
     fetch_columbia_permits,
+)
+
+
+# =============================================================================
+# BAKER County L2/L3 — re-exported from baker_terra (separate module, same precedent
+# as columbia_terra above). County #20 — THIN (ODOT 'ames' cadastral: geometry +
+# taxlot identity only; owner/situs/valuation honestly IN FLIGHT). First of the
+# ODOT-ames rural cohort (Baker/Curry/Grant/Harney/Klamath/Lake/Wheeler).
+# =============================================================================
+from .baker_terra import (
+    fetch_baker_assessment,
+    fetch_baker_records,
+    fetch_baker_permits,
 )
 
 
