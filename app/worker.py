@@ -6,9 +6,17 @@ import email
 from email.header import decode_header
 import psycopg
 import httpx
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+
+import email_ingest
 
 POLL_INTERVAL = 30
+
+# Live email ingest (TASK-EMAIL-INGEST-01) runs on its own slower cadence than the
+# 30s worker tick — re-logging into 10 mailboxes every 30s is needless churn, and the
+# SINCE-windowed fetch + per-mailbox dedup makes a 5-minute beat plenty fresh.
+EMAIL_INGEST_INTERVAL = 300
+_last_email_ingest = 0.0
 
 def get_db_connection():
     return psycopg.connect(
@@ -154,6 +162,7 @@ def get_active_owners():
                     SELECT email FROM users
                     WHERE role IN ('founder', 'cso', 'admin', 'owner', 'executive')
                     AND email IS NOT NULL
+                    AND tombstoned_at IS NULL
                     ORDER BY created_at ASC
                 """)
                 rows = cur.fetchall()
@@ -258,6 +267,56 @@ def poll_imap():
         print(f"ERROR: poll_imap failed: {e}")
 
 
+def poll_email_ingest():
+    """Live sync: pull NEW mail from every enabled mailbox into knowledge_store with
+    the same tier classification as the bulk pull, then reconcile cross-mailbox private
+    sharing. Read-only IMAP (EXAMINE) — never marks real mail \\Seen. Per-mailbox dedup
+    means re-seeing a message is a cheap no-op. Gated by EMAIL_INGEST_ENABLED.
+
+    Credentials live in mailbox_ingest_creds (cPanel-rotated passwords + orb-inbound's
+    .env password), so live sync survives worker restarts without re-rotation."""
+    global _last_email_ingest
+    if os.getenv("EMAIL_INGEST_ENABLED", "true").strip().lower() not in ("1", "true", "yes", "on"):
+        return
+    now = time.time()
+    if now - _last_email_ingest < EMAIL_INGEST_INTERVAL:
+        return
+    _last_email_ingest = now
+
+    # SINCE window (date-granular in IMAP); dedup handles the overlap re-sees.
+    since = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%d-%b-%Y")
+    search = f"(SINCE {since})"
+    try:
+        conn = get_db_connection()
+        with conn, conn.cursor() as cur:
+            cur.execute("SELECT mailbox, password FROM mailbox_ingest_creds WHERE enabled ORDER BY mailbox")
+            creds = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        print(f"ERROR: poll_email_ingest cred load failed: {e}")
+        return
+
+    total_new = 0
+    for mailbox, password in creds:
+        try:
+            stats = email_ingest.ingest_mailbox(mailbox, password, search=search)
+            total_new += stats["inserted"]
+            if stats["inserted"]:
+                print(f"INFO: email_ingest {mailbox}: +{stats['inserted']} new "
+                      f"({stats['private']} private)")
+            conn = get_db_connection()
+            with conn, conn.cursor() as cur:
+                cur.execute("UPDATE mailbox_ingest_creds SET last_synced_at=now() WHERE mailbox=%s", (mailbox,))
+            conn.close()
+        except Exception as e:
+            print(f"ERROR: email_ingest {mailbox} failed: {e}")
+    if total_new:
+        # New private-box mail may share a Message-ID with an existing public copy.
+        rec = email_ingest.reconcile_shared_private()
+        if rec.get("upgraded_to_private"):
+            print(f"INFO: email_ingest reconcile upgraded {rec['upgraded_to_private']} to private")
+
+
 def execute_yakov_tasks():
     try:
         conn = get_db_connection()
@@ -353,5 +412,6 @@ print(f"Poll interval: {POLL_INTERVAL}s")
 while True:
     fire_due_reminders()
     poll_imap()
+    poll_email_ingest()
     execute_yakov_tasks()
     time.sleep(POLL_INTERVAL)
