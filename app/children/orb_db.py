@@ -590,6 +590,46 @@ COUNTY_REGISTRY = {
             FROM hit h
         """,
     },
+    "009": {  # Columbia (FIPS 41-009) — NW Oregon, lower Columbia River. St. Helens / Scappoose / Rainier / Clatskanie / Vernonia
+        "name": "Columbia",
+        # bbox: Columbia spans the lower Columbia River from the Multnomah/Sauvie
+        # line NW to the Clatsop border, south to the Washington-county edge near
+        # Vernonia. St. Helens (county seat), Scappoose, Rainier, Clatskanie,
+        # Vernonia, Columbia City, Prescott, Deer Island, Warren + unincorporated.
+        # Padded from the ingested polygon envelope (45.721,46.187,-123.367,-122.766).
+        "bbox": (45.70, 46.21, -123.42, -122.72),
+        # Columbia's TaxlotWb FeatureServer ships parcel polygon JOINED to the
+        # assessor account in one row (Polk/Marion pattern) — owner, agent, situs,
+        # account, property class, acreage all inline. So this resolver is a SQL
+        # pass-through over parcels_columbia, no scrape. Acres: taxlot_acres
+        # (assessor of record) -> sqft/43560 (city lots) -> geodesic ST_Area.
+        # situs uses primary_situs (the verbatim combined "street CITY OR zip"
+        # string) — always display-correct even where the city-suffix split is null.
+        "query": """
+            SELECT taxlot,
+                   map_number AS section_id,
+                   ROUND(
+                       COALESCE(
+                           NULLIF(taxlot_acres, 0),
+                           NULLIF(taxlot_sqft, 0) / 43560.0,
+                           ST_Area(geom::geography) / 4046.8564224
+                       )::numeric,
+                       3
+                   ) AS acres,
+                   'https://www.columbiacountyor.gov/departments/Assessor' AS county_url,
+                   map_number,
+                   COALESCE(NULLIF(owner_line1, ''), NULLIF(agent_name, '')) AS owner_name,
+                   NULLIF(primary_situs, '') AS situs_address,
+                   NULL::text AS zone_code,
+                   NULL::text AS zone_label,
+                   ST_AsText(ST_Centroid(geom)) AS parcel_centroid,
+                   'Columbia'::text AS county_name,
+                   '009'::text AS county_fips
+            FROM parcels_columbia
+            WHERE ST_Contains(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326))
+            LIMIT 1
+        """,
+    },
     "053": {  # Polk (FIPS 41-053) — Tier 2 Major, Dallas / Independence / Monmouth / West Salem
         "name": "Polk",
         # bbox: Polk spans the west Willamette Valley from the Coast Range east
@@ -1438,6 +1478,12 @@ def fetch_crook_assessment(taxlot: str, force_refresh: bool = False) -> dict:
 # fetch_county_permits — counties NOT in this set get a structured response
 # saying the state portal won't have their permits, look elsewhere.
 _OREGON_EPERMITTING_FIPS = {
+    "009",  # Columbia     — confirmed via columbiacountyor.gov/departments/Building:
+            #                structural / plumbing / mechanical / electrical applied
+            #                online through the State of Oregon ePermitting portal
+            #                (aca-oregon.accela.com/oregon). All jurisdictions
+            #                (St. Helens / Scappoose / Rainier / Clatskanie / Vernonia /
+            #                Columbia City / Prescott / unincorporated) ride state Accela.
     "041",  # Lincoln      — Tier 3 Standard central coast. All jurisdictions
             #                (Newport / Lincoln City / Toledo / Waldport / Depoe Bay /
             #                Yachats / Siletz / unincorporated) ride state Accela.
@@ -4426,6 +4472,19 @@ from .polk_terra import (
     fetch_polk_assessment,
     fetch_polk_records,
     fetch_polk_permits,
+)
+
+
+# =============================================================================
+# COLUMBIA County L2/L3 — re-exported from columbia_terra (separate module, same
+# precedent as polk_terra above to avoid concurrent-edit thrash during Yindo
+# parallel-session expansions). County #19. Functional contract identical to every
+# other county; callers keep using `from .orb_db import fetch_columbia_*`.
+# =============================================================================
+from .columbia_terra import (
+    fetch_columbia_assessment,
+    fetch_columbia_records,
+    fetch_columbia_permits,
 )
 
 

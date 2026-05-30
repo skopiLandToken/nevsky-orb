@@ -72,6 +72,9 @@ from .orb_db import (
     fetch_polk_assessment,
     fetch_polk_records,
     fetch_polk_permits,
+    fetch_columbia_assessment,
+    fetch_columbia_records,
+    fetch_columbia_permits,
     fetch_douglas_assessment,
     fetch_douglas_records,
     fetch_douglas_permits,
@@ -180,6 +183,9 @@ TIER_TOOLS = {
         "fetch_polk_assessment",
         "fetch_polk_records",
         "fetch_polk_permits",
+        "fetch_columbia_assessment",
+        "fetch_columbia_records",
+        "fetch_columbia_permits",
         "fetch_douglas_assessment",
         "fetch_douglas_records",
         "fetch_douglas_permits",
@@ -255,6 +261,9 @@ TIER_TOOLS = {
         "fetch_polk_assessment",
         "fetch_polk_records",
         "fetch_polk_permits",
+        "fetch_columbia_assessment",
+        "fetch_columbia_records",
+        "fetch_columbia_permits",
         "fetch_douglas_assessment",
         "fetch_douglas_records",
         "fetch_douglas_permits",
@@ -850,6 +859,36 @@ ALL_TOOL_SCHEMAS = {
             "required": ["taxlot"]
         }
     },
+    "fetch_columbia_assessment": {
+        "name": "fetch_columbia_assessment",
+        "description": "TERRA: Fetch the Columbia County assessment + ownership snapshot for a taxlot (St. Helens / Scappoose / Rainier / Clatskanie / Vernonia / Columbia City / Prescott / Deer Island / Warren / unincorporated). Use when the user asks about a parcel in NW Oregon along the lower Columbia River — the timber-and-river county between Portland and the Clatsop coast. Columbia's public TaxlotWb FeatureServer is POLK/MARION-RICH: source ships the assessor account JOINED to the polygon in ONE row — owner_line1, agent_name, full mailing block (M_ADDRESS/city/state/zip), situs (primary_situs full string, plus parsed street/city/zip), account_id, ACCELA_MT (the pre-formatted Accela map-taxlot permit key), property class, residence + building COUNTS, acreage (ACRES + SQFT). NO scraper, NO viewstate gating, NO HTTP per call — pure SQL pass-through over parcels_columbia. IN FLIGHT — flag honestly, do not invent: valuation (the public TaxlotWb layer ships NEITHER assessed NOR RMV — values live in the bi-weekly Tax26 export + assessor portal; surface null, broker pulls via account number); building details beyond residence/building counts (year built / bed / bath not exposed); zoning (Land_Development folder not yet ingested); the interactive county web map (ColumbiaCountyWebMaps) is OFFLINE since 2026-04-22 for an ADA/WCAG upgrade, so deep links surface the live Assessor/GIS landing pages + REST query rather than the web-map app. FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (👤 OWNER / 🏠 SITUS / 🧾 ACCOUNT / 💰 VALUATION / 🌍 ACREAGE / 🏚️ STRUCTURES / 🔗 DEEP LINKS). In 💰 VALUATION state plainly that Columbia's public layer exposes no valuation — never fabricate a number. End with the assessor_home + gis_data deep links as broker hand-off.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "taxlot": {"type": "string", "description": "Columbia MAP_TAX (e.g. '7N4W1000 1001') or ACCELA_MT (e.g. '7410-00-01001')."},
+                "force_refresh": {"type": "boolean", "default": False, "description": "Currently no-op — Columbia L2 is a SQL pass-through over L1 inline; freshness comes from the L1 ingest."}
+            },
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_columbia_records": {
+        "name": "fetch_columbia_records",
+        "description": "TERRA: Fetch the Columbia County owner-of-record + recording hand-off for a taxlot. Use when the user asks about deeds, recent transfer, recorded documents, or current owner of record on a Columbia County parcel. Returns the current owner of record (primary + agent + mailing block + account_id) and a deep link to the Columbia County Clerk recording office. IN FLIGHT — flag honestly: the Columbia TaxlotWb layer does NOT carry an inline instrument snapshot (unlike Polk/Marion which ship last instrument id/type/year/month), so latest_instrument is null in v1 — the Clerk recording office (deep link) is the chain-of-title hand-off, and a per-parcel sale fetch off the county's separate `Sales` FeatureServer (Good Sales 1/2/3-yrs-ago, queryable) is queued as the L3 follow-up; recorded sale price lives there too. FORMATTING: TERRA aesthetic. 📜 emoji header. Lead with owner_of_record, then the clerk_recording_office deep link. Frame the IN FLIGHT as 'recorded deeds + sale chain are one tap from the County Clerk / queued from the Sales layer' — never apologize, never fabricate an instrument.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
+    "fetch_columbia_permits": {
+        "name": "fetch_columbia_permits",
+        "description": "TERRA: Fetch building permits for a Columbia County parcel via Oregon's state ePermitting portal (Accela ACA). One-line wrapper around fetch_county_permits('009') — Columbia rides state Accela (confirmed via columbiacountyor.gov/departments/Building: structural / plumbing / mechanical / electrical applied online through the State portal). All Columbia jurisdictions (St. Helens / Scappoose / Rainier / Clatskanie / Vernonia / Columbia City / Prescott / unincorporated) route through aca-oregon.accela.com/oregon — no Columbia-direct Accela tenant. The ACCELA_MT key stored on each parcel maps 1:1 to the Accela map-taxlot search. IN FLIGHT — same deep-link-only pattern as the state-Accela cohort (Polk / Benton / Douglas / Marion): server-side scrape gated on viewstate capture / Playwright; currently returns the verified Accela deep link. FORMATTING: TERRA aesthetic. 🚧 emoji header. Surface jurisdiction ('Columbia County — Oregon state Accela'). Frame the deep link as 'one tap from the live state portal.'",
+        "input_schema": {
+            "type": "object",
+            "properties": {"taxlot": {"type": "string"}, "force_refresh": {"type": "boolean", "default": False}},
+            "required": ["taxlot"]
+        }
+    },
     "fetch_douglas_assessment": {
         "name": "fetch_douglas_assessment",
         "description": "TERRA: Fetch the Douglas County assessment + ownership + zoning + timber snapshot for a taxlot (Roseburg / Sutherlin / Winston / Myrtle Creek / Canyonville / Reedsport / Drain / Yoncalla / Oakland / Glendale / Riddle / unincorporated). Use when the user asks about a Douglas County parcel — Southern Oregon I-5 corridor between Eugene and Medford, with major timber + agricultural acreage. Douglas's public Parcels FeatureServer is MARION-RICH plus richer than Polk: source ships joined parcel + account attrs in ONE row — owner_name (NAME, 350 char), full mailing block (addr1/2/3 + csz), situs (address + csz), account family (taxid + prop_id + alt_acctnum + owner_id), property class (PROPCLASS — 9xx prefix = forest / timber / O&C grant land), full valuation breakdown (assessed + RMV land + RMV imp + RMV total — RICHER than Polk which only ships assessed), acreage (account-of-record + material + total/GIS), latest instrument (inst_no + sale_date), legal description (unbounded). NO scraper, NO viewstate gating, NO HTTP per call — pure SQL pass-through over parcels_douglas + spatial join against douglas_zoning (DC_ZONE — F1/F2/F3/FF/FG = forest variants, AW = agricultural watershed / EFU equivalent, R1-R3/RR residential, C1-C3 commercial, M1-M3 industrial). TIMBER MP SIGNAL: returns a structured `timber` block flagging forest-class (PROPCLASS 9xx) + forest-zone (DC_ZONE F-prefix) parcels — TIMBER-LAND MARKETING PARTNER differentiator per KB_75 / TERRA-CLOSER-01. IN FLIGHT — flag honestly: multi-year tax payment history (Orion Taxlot Information deep-links are session-gated); full chain of title (Clerk recordings session-gated); building details (year built / sqft / bed / bath — not on the Parcels FeatureServer). FORMATTING: TERRA SCAN aesthetic. ✨ vault-opening reveal. Section headers with emoji (👤 OWNER / 🏠 SITUS / 🧾 ACCOUNT / 🏘️ ZONING / 🌲 TIMBER if timber_mp_signal=true / 💰 VALUATION / 🌍 ACREAGE / 📜 LATEST INSTRUMENT / 🔗 DEEP LINKS). Surface RMV total + assessed prominently in 💰 VALUATION (call out the RMV/assessed split — Douglas ships both, unlike Polk). When `timber.timber_mp_signal=true`, ADD a 🌲 TIMBER section that names the forest PROPCLASS and/or forest DC_ZONE — this is the differentiating fact for the timber MP angle. End with assessment_search + gis_viewer deep links as broker hand-off.",
@@ -1212,6 +1251,9 @@ LOCAL_TOOL_FUNCTIONS = {
     "fetch_polk_assessment": fetch_polk_assessment,
     "fetch_polk_records": fetch_polk_records,
     "fetch_polk_permits": fetch_polk_permits,
+    "fetch_columbia_assessment": fetch_columbia_assessment,
+    "fetch_columbia_records": fetch_columbia_records,
+    "fetch_columbia_permits": fetch_columbia_permits,
     "fetch_douglas_assessment": fetch_douglas_assessment,
     "fetch_douglas_records": fetch_douglas_records,
     "fetch_douglas_permits": fetch_douglas_permits,
