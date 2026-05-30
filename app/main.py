@@ -208,6 +208,29 @@ class EditDraftRequest(BaseModel):
     outbound_message: str | None = None
 # ── END CROSS-CHILD-DRAFT models ─────────────────────────────────────
 
+# TYPING-INDICATOR-01: shared "is working" signal for ALL children.
+# Resolves token via {NAME}_BOT_TOKEN with TELEGRAM_BOT_TOKEN fallback,
+# so any future child inherits this automatically (same convention as send_*).
+async def send_chat_action(chat_id: int, child_name: str = "", action: str = "typing"):
+    """Fire a Telegram chat action (default 'typing') for the given child.
+    Non-blocking best-effort: never raises into the caller."""
+    bot_token = ""
+    if child_name:
+        bot_token = os.environ.get(f"{child_name.upper()}_BOT_TOKEN", "")
+    if not bot_token:
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if not bot_token:
+        return
+    url = f"https://api.telegram.org/bot{bot_token}/sendChatAction"
+    payload = {"chat_id": chat_id, "action": action}
+    try:
+        async with httpx.AsyncClient() as c:
+            await c.post(url, json=payload, timeout=5)
+        print(f"[send_chat_action] OK: child={child_name or 'default'} chat_id={chat_id} action={action}")
+    except Exception as e:
+        logger.warning("send_chat_action error (child=%s): %s", child_name, e)
+
+
 async def send_telegram_message(chat_id: int, text: str, reply_markup: dict | None = None):
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
@@ -3088,6 +3111,30 @@ async def ingest_telegram_update(request: Request):
     payload = await request.json()
     return await process_telegram_payload(payload)
 
+# === LILITH-CARDS-01: TERRA callback responder routing ===
+# A TERRA parcel card can be served by any child (Sophia->Iosif, Ophelia->Dan,
+# Lilith->Jacob). When the user taps a button, the response MUST go back through
+# the SAME bot they tapped on -- otherwise the reply misfires as the wrong bot or
+# is never delivered. response_bot_token (passed by each child's webhook) is the
+# source of truth; the is_dan/Sophia branch is kept ONLY as the legacy fallback
+# for webhooks that don't pass a token (Sophia's, Ophelia's).
+def _terra_resolve_responder(response_bot_token, sender_telegram_id):
+    _lilith = os.environ.get("LILITH_BOT_TOKEN", "")
+    _ophelia = os.environ.get("OPHELIA_BOT_TOKEN", "")
+    _sophia = os.environ.get("SOPHIA_BOT_TOKEN", "")
+    if response_bot_token:
+        if _lilith and response_bot_token == _lilith:
+            return "lilith", send_lilith_message, send_lilith_message_with_markup
+        if _ophelia and response_bot_token == _ophelia:
+            return "ophelia", send_ophelia_message, send_ophelia_message_with_markup
+        if _sophia and response_bot_token == _sophia:
+            return "sophia", send_sophia_message, send_sophia_message_with_markup
+    # Legacy fallback: no token passed -> preserve original is_dan behavior.
+    if callable(globals().get("is_dan")) and is_dan(sender_telegram_id):
+        return "ophelia", send_ophelia_message, send_ophelia_message_with_markup
+    return "sophia", send_sophia_message, send_sophia_message_with_markup
+
+
 async def process_telegram_callback_query(callback_query: dict, response_bot_token: str | None = None):
     callback_query_id = callback_query.get("id")
     data = (callback_query.get("data") or "").strip()
@@ -3350,6 +3397,12 @@ async def process_telegram_callback_query(callback_query: dict, response_bot_tok
                 await answer_telegram_callback_query(callback_query_id, "No taxlot in callback data.")
             return {"ok": False, "reason": "missing_taxlot"}
 
+        # LILITH-CARDS-01: route this tap's response through the bot it came from.
+        _cb_from = callback_query.get("from", {}) or {}
+        _cb_sender = str(_cb_from.get("id", ""))
+        _resp_child, _resp_send, _resp_send_markup = _terra_resolve_responder(
+            response_bot_token, _cb_sender)
+
         # ── Phase 3: YIELD CALC + ADD LOT VALUE handlers ─────────────────
         if action == "parcel_yield":
             if callback_query_id:
@@ -3363,14 +3416,8 @@ async def process_telegram_callback_query(callback_query: dict, response_bot_tok
                 return {"ok": False, "reason": "yield_calc_error"}
             _card = _terra_format_yield_card(_yield_result)
             _kb = _terra_build_yield_card_keyboard(_yield_result)
-            from_user = callback_query.get("from", {}) or {}
-            _sender = str(from_user.get("id", ""))
-            _is_dan = callable(globals().get("is_dan")) and is_dan(_sender)
             try:
-                if _is_dan:
-                    await send_ophelia_message_with_markup(chat_id, _card, _kb)
-                else:
-                    await send_sophia_message_with_markup(chat_id, _card, _kb)
+                await _resp_send_markup(chat_id, _card, _kb)
             except Exception as _send_err:
                 print(f"[parcel_yield] send error: {_send_err}")
                 if chat_id:
@@ -3405,14 +3452,8 @@ async def process_telegram_callback_query(callback_query: dict, response_bot_tok
                 f"_Parcel:_ `{taxlot}`  ·  _expires in 5 min_\n\n"
                 "_Your number, your market — TERRA doesn't pretend to know it better._"
             )
-            from_user = callback_query.get("from", {}) or {}
-            _sender = str(from_user.get("id", ""))
-            _is_dan = callable(globals().get("is_dan")) and is_dan(_sender)
             try:
-                if _is_dan:
-                    await send_ophelia_message(chat_id, _prompt)
-                else:
-                    await send_sophia_message(chat_id, _prompt)
+                await _resp_send(chat_id, _prompt)
             except Exception as _send_err:
                 print(f"[parcel_yield_setval] send error: {_send_err}")
             return {"ok": True, "action": action, "taxlot": taxlot, "pending": True}
@@ -3456,9 +3497,7 @@ async def process_telegram_callback_query(callback_query: dict, response_bot_tok
         try:
             from children.child_engine import ask_child as _engine_ask
             import json as _json
-            from_user = callback_query.get("from", {}) or {}
-            sender_telegram_id = str(from_user.get("id", ""))
-            child_name = "ophelia" if (callable(globals().get("is_dan")) and is_dan(sender_telegram_id)) else "sophia"
+            child_name = _resp_child
 
             format_prompt = (
                 f"The user tapped the {action.replace('parcel_', '').upper()} button on a TERRA parcel card "
@@ -3488,10 +3527,7 @@ async def process_telegram_callback_query(callback_query: dict, response_bot_tok
         _chain_kb = _terra_build_parcel_keyboard(taxlot, _chain_prop_id)
 
         try:
-            if child_name == "sophia":
-                await send_sophia_message_with_markup(chat_id, _formatted, _chain_kb)
-            else:
-                await send_ophelia_message_with_markup(chat_id, _formatted, _chain_kb)
+            await _resp_send_markup(chat_id, _formatted, _chain_kb)
             print(f"[parcel_callback] OK: action={action} taxlot={taxlot} child={child_name}")
         except Exception as _send_err:
             print(f"[parcel_callback] send error: {_send_err} (action={action})")
@@ -4581,6 +4617,7 @@ async def sophia_webhook(request: Request):
             if _query_text.lower() in ["/start", "hi", "hello", "hi sophia", "hello sophia", ""]:
                 await send_sophia_message(chat_id, _engine_intro("sophia"))
             else:
+                await send_chat_action(chat_id, "sophia")  # TYPING-INDICATOR-01
                 _reply = await _engine_ask("sophia", user_message=_query_text)
                 # TERRA-FIELD-7C: detect parcel scan and add buttons
                 _taxlot = _terra_extract_taxlot(_reply) if "TERRA SCAN COMPLETE" in _reply else None
@@ -4868,14 +4905,32 @@ async def lilith_webhook(request: Request):
     # === END OWNER CHECK (lilith) ===
 
     # === ENGINE ROUTING (lilith, 2026-05-25) ===
+    # LILITH-PIN-01: handle location pins (Jacob drops a map pin -> TERRA),
+    # and only show intro on an ACTUAL greeting (not on empty text from a pin).
+    _loc = message.get("location") or {}
+    _query_text = text
+    if _loc.get("latitude") is not None and _loc.get("longitude") is not None:
+        _lat = _loc.get("latitude"); _lon = _loc.get("longitude")
+        _query_text = (f"User dropped a Telegram location pin at coordinates {_lat}, {_lon}. "
+                       f"What parcel is at this location? Use lookup_parcel_by_point and report findings clearly.")
+        print(f"[lilith_webhook] TERRA pin: lat={_lat} lon={_lon}")
     if chat_id:
         try:
             from children.child_engine import ask_child as _engine_ask, get_intro as _engine_intro
-            if text.lower() in ["/start", "hi", "hello", "hi lilith", "hello lilith", ""]:
+            if _query_text.strip().lower() in ["/start", "hi", "hello", "hi lilith", "hello lilith"]:
                 await send_lilith_message(chat_id, _engine_intro("lilith"))
+            elif not _query_text.strip():
+                await send_lilith_message(chat_id, "I didn't catch that — send me text, a taxlot, or drop a location pin and I'll run it through TERRA.")
             else:
-                _reply = await _engine_ask("lilith", user_message=text)
-                await send_lilith_message(chat_id, _reply)
+                await send_chat_action(chat_id, "lilith")
+                _reply = await _engine_ask("lilith", user_message=_query_text)
+                _taxlot = _terra_extract_taxlot(_reply) if "TERRA SCAN COMPLETE" in _reply else None
+                if _taxlot:
+                    _prop_id = _terra_extract_property_id(_reply)
+                    _kb = _terra_build_parcel_keyboard(_taxlot, _prop_id)
+                    await send_lilith_message_with_markup(chat_id, _reply, _kb)
+                else:
+                    await send_lilith_message(chat_id, _reply)
         except Exception as _engine_err:
             print(f"[lilith_webhook] engine error: {_engine_err}")
             await send_lilith_message(chat_id, "Lilith hit an internal error. Yakov has been logged.")
